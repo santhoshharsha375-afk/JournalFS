@@ -307,7 +307,7 @@ static int jfs_rename(const char *from, const char *to, unsigned int flags)
     memcpy(to_name, tslash + 1, tnlen);
     to_name[tnlen] = '\0';
 
-    return fs_rename(g_fs, from_parent, from_name, to_name) == JFS_OK ? 0 : -EIO;
+    return fs_rename(g_fs, from_parent, to_parent, from_name, to_name) == JFS_OK ? 0 : -EIO;
 }
 
 static int jfs_truncate(const char *path, off_t size,

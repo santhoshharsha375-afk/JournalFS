@@ -549,8 +549,8 @@ int fs_rmdir(struct filesystem *fs, uint32_t dir_ino, const char *name)
     return tx_commit(&tx);
 }
 
-int fs_rename(struct filesystem *fs, uint32_t dir_ino, const char *old_name,
-              const char *new_name)
+int fs_rename(struct filesystem *fs, uint32_t old_parent, uint32_t new_parent,
+              const char *old_name, const char *new_name)
 {
     if (!fs || !old_name || !new_name)
         return JFS_ERR_INVAL;
@@ -561,12 +561,7 @@ int fs_rename(struct filesystem *fs, uint32_t dir_ino, const char *old_name,
         return rc;
 
     uint32_t ino;
-    rc = fs_lookup(fs, dir_ino, old_name, &ino);
-    if (rc != JFS_OK)
-        return rc;
-
-    /* Remove the old dirent and add the new one. */
-    rc = fs_dir_remove(fs, &tx, dir_ino, old_name);
+    rc = fs_lookup(fs, old_parent, old_name, &ino);
     if (rc != JFS_OK)
         return rc;
 
@@ -575,7 +570,11 @@ int fs_rename(struct filesystem *fs, uint32_t dir_ino, const char *old_name,
     if (rc != JFS_OK)
         return rc;
 
-    rc = fs_dir_add(fs, &tx, dir_ino, new_name, ino, in.type);
+    rc = fs_dir_remove(fs, &tx, old_parent, old_name);
+    if (rc != JFS_OK)
+        return rc;
+
+    rc = fs_dir_add(fs, &tx, new_parent, new_name, ino, in.type);
     if (rc != JFS_OK)
         return rc;
 

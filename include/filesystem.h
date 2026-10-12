@@ -59,8 +59,8 @@ int fs_create(struct filesystem *fs, uint32_t dir_ino, const char *name,
               uint32_t type, uint32_t mode, uint32_t *out_ino);
 int fs_unlink(struct filesystem *fs, uint32_t dir_ino, const char *name);
 int fs_rmdir(struct filesystem *fs, uint32_t dir_ino, const char *name);
-int fs_rename(struct filesystem *fs, uint32_t dir_ino, const char *old_name,
-              const char *new_name);
+int fs_rename(struct filesystem *fs, uint32_t old_parent, uint32_t new_parent,
+              const char *old_name, const char *new_name);
 int fs_truncate(struct filesystem *fs, uint32_t ino, uint64_t size);
 
 /* ---- data I/O (payload only; metadata changes are journaled) ------- */
