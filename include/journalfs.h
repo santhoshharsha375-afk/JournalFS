@@ -50,6 +50,10 @@ extern "C" {
 #define JFS_NAME_MAX       244u
 #define JFS_MAX_UPDATES     64u
 
+/* Sentinel for an unallocated / unused block slot in an inode.  Zero is a
+ * perfectly valid data-block index, so it cannot mean "free". */
+#define JFS_BLOCK_FREE     0xFFFFFFFFu
+
 /* Block numbers of the fixed regions. */
 #define SUPERBLOCK_BLOCK    0u
 #define BITMAP_START        1u
@@ -124,8 +128,8 @@ struct inode {
     uint32_t direct[JFS_NDIRECT];    /* 0x44  12 * 4 = 48 bytes */
     uint32_t indirect;               /* 0x5C  indirect blk num  */
     uint32_t pad;                    /* 0x60                    */
-    uint32_t crc;                    /* 0x64                    */
-    uint8_t  tail[INODE_SIZE - 0x68];/* 0x68 .. 256             */
+    uint32_t crc;                    /* 0x7C                    */
+    uint8_t  tail[INODE_SIZE - 0x80];/* 0x80 .. 256             */
 };
 
 _Static_assert(sizeof(struct inode) == INODE_SIZE, "inode size mismatch");

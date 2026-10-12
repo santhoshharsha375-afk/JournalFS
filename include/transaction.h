@@ -29,22 +29,41 @@ struct tx_update {
 };
 
 struct transaction {
+    struct tx_manager *mgr;         /* owning manager                 */
     uint32_t txid;
-    uint32_t seq;                   /* next sequence number to use */
+    uint32_t seq;
     uint32_t generation;
     uint32_t update_count;
     struct tx_update updates[JFS_MAX_UPDATES];
+    uint32_t begin_slot;            /* journal slot of the BEGIN record  */
+    uint32_t commit_slot;           /* journal slot of the COMMIT record */
     int      committed;
     int      applied;
+};
+
+/* Crash-injection stages.  A harness sets manager->crash_point to one of
+ * these; the transaction code aborts the process at that stage so the
+ * persistence protocol can be tested at every boundary. */
+enum crash_stage {
+    CRASH_NONE = 0,
+    CRASH_BEFORE_PERSIST,   /* before writing the transaction          */
+    CRASH_AFTER_BEGIN,      /* after the BEGIN record is written        */
+    CRASH_DURING_UPDATES,   /* during metadata update records           */
+    CRASH_AFTER_PERSIST,    /* after journal records are persisted      */
+    CRASH_DURING_COMMIT,    /* during commit-record writing             */
+    CRASH_AFTER_COMMIT,     /* after the commit record is persisted     */
+    CRASH_DURING_APPLY,     /* during home-block updates                 */
+    CRASH_AFTER_APPLY       /* after home blocks, before checkpoint     */
 };
 
 /* The transaction manager binds a disk image to a journal state. */
 struct tx_manager {
     struct disk *disk;
     struct journal_state state;
-    void *mutex;                    /* platform mutex handle      */
-    int   no_journal;               /* comparison mode: skip WAL  */
-    int   crash_point;              /* >=0 => abort at this stage */
+    struct superblock sb;           /* in-memory superblock copy   */
+    void *mutex;                    /* platform mutex handle       */
+    int   no_journal;               /* comparison mode: skip WAL   */
+    int   crash_point;              /* >=0 => abort at this stage  */
 };
 
 /* Open the manager on an existing image.  No formatting is performed. */
@@ -54,10 +73,15 @@ void tx_manager_close(struct tx_manager *tm);
 
 /* Begin a new transaction.  Fails if one is already active. */
 int tx_begin(struct tx_manager *tm, struct transaction *tx);
-
-/* Stage an update to a metadata block.  The block is copied into the
- * transaction; the caller may reuse its buffer afterwards. */
+/* Stage an update to a metadata block.  If the block is already staged in
+ * this transaction, the new contents replace the staged copy in place, so
+ * several modifications to one block are merged instead of clobbering each
+ * other.  The block is copied into the transaction. */
 int tx_stage_update(struct transaction *tx, uint32_t block, const void *data);
+
+/* Return a pointer to the in-transaction staged contents of a block, or NULL
+ * if the block has not been staged yet. */
+uint8_t *tx_get_staged(struct transaction *tx, uint32_t block);
 
 /* Persist all staged records to the journal and fsync. */
 int tx_persist(struct transaction *tx);
@@ -79,6 +103,10 @@ int tx_recover(struct tx_manager *tm, char *report, size_t report_len);
 
 /* Set a deterministic crash point (used by the crash-injection harness). */
 void tx_set_crash_point(struct tx_manager *tm, int stage);
+
+/* Force a checkpoint: advance the journal tail to reclaim the space used by
+ * transactions that are already applied.  Safe to call when idle. */
+int tx_checkpoint(struct tx_manager *tm);
 
 #ifdef __cplusplus
 }
