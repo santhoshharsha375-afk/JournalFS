@@ -1,0 +1,24 @@
+# Build artefacts
+/build/
+*.o
+*.a
+
+# Test mount point and images
+/mnt/
+*.img
+
+# Benchmark / crash-test output
+/results/*.csv
+/results/*.png
+/results/*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editor / OS
+.vs/
+.vscode/
+.DS_Store
+Thumbs.db
