@@ -67,8 +67,13 @@ Structures (all with _Static_assert size checks):
                         last_checkpointed_txid, journal_generation, crc.
   struct inode       -- magic 'INOD', ino, type (FILE=1/DIR=2), mode, uid/gid,
                         nlink, size, atime/mtime/ctime, block_count,
-                        direct[12], indirect (1024 more block pointers), crc.
-                        Max file size = (12+1024)*4096 = ~4.2 MB.
+                        direct[12], reserved 'indirect' (always FREE), crc.
+                        Max file size = 12 * 4096 = 48 KB.  JournalFS has no
+                        indirect block: the 13th allocation reports
+                        JFS_ERR_NOSPC and writes past 48 KB report
+                        JFS_ERR_TOOLARGE.  The 'indirect' field remains on
+                        disk only so the inode layout is unchanged; fsck
+                        flags any non-FREE value as corruption.
   struct dirent      -- ino, type, name_len, name[244]; exactly 256 bytes.
   struct jrec_header -- magic 'JREC', type (BEGIN=1/UPDATE=2/COMMIT=3), txid,
                         seq, generation, payload_len, block, crc (32 bytes).

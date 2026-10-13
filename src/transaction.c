@@ -1,28 +1,10 @@
 /*
  * transaction.c -- Transaction manager and write-ahead logging protocol.
  *
- * Every metadata mutation in JournalFS goes through this module.  The
- * protocol implemented here is:
- *
- *   1. Construct metadata updates in memory.            (tx_stage_update)
- *   2. Write BEGIN + UPDATE records to the journal.     (tx_persist)
- *   3. Persist the journal records (fsync).             (tx_persist)
- *   4. Write the COMMIT record.                         (tx_commit_record)
- *   5. Persist the commit record (fsync).               (tx_commit_record)
- *      -- this is the durable commit point --
- *   6. Apply updates to their home blocks.              (tx_apply)
- *   7. Persist the home blocks (fsync).                 (tx_apply)
- *   8. The superblock update (staged in step 1) records the new journal
- *      head and marks the transaction checkpointed, so journal space can
- *      be reclaimed safely.
- *
- * Write-ahead rule: a home metadata block is never persisted before the
- * committed transaction that produced it is durable in the journal.  The
- * superblock itself is an ordinary journaled block (block 0), so a torn
- * superblock write is repaired by replaying the journal.
- *
- * Concurrency is serialised by a single global mutex: correctness before
- * optimisation.
+ * Implements the 8-step WAL protocol: persist journal records and the
+ * commit record (fsync) before applying any home block, so the commit
+ * record is the durable commit point.  Full protocol: docs/wal_protocol.md.
+ * Concurrency is serialised by a single global mutex.
  */
 #include "transaction.h"
 

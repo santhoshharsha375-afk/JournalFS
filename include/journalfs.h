@@ -108,8 +108,7 @@ _Static_assert(sizeof(struct superblock) == BLOCK_SIZE, "superblock must be one 
 #define JFS_TYPE_FILE       1u
 #define JFS_TYPE_DIR        2u
 
-#define JFS_NDIRECT         12u
-#define JFS_INDIRECT_BLOCKS (BLOCK_SIZE / 4u)   /* 1024 */
+#define JFS_NDIRECT         12u         /* max data blocks per file: 48 KB */
 
 struct inode {
     uint32_t magic;                  /* 0x00                    */
@@ -126,7 +125,7 @@ struct inode {
     uint64_t ctime;                  /* 0x38                    */
     uint32_t block_count;            /* 0x40  allocated blocks  */
     uint32_t direct[JFS_NDIRECT];    /* 0x44  12 * 4 = 48 bytes */
-    uint32_t indirect;               /* 0x5C  indirect blk num  */
+    uint32_t indirect;               /* 0x5C  reserved (= FREE) */
     uint32_t pad;                    /* 0x60                    */
     uint32_t crc;                    /* 0x7C                    */
     uint8_t  tail[INODE_SIZE - 0x80];/* 0x80 .. 256             */

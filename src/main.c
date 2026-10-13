@@ -55,82 +55,17 @@ static int apply_crash_point(struct filesystem *fs)
     return JFS_OK;
 }
 
-/* Resolve /a/b/c to its parent directory inode and final name. */
+/* Resolve a full path to its inode, and a path to its parent + final name.
+ * Both are thin wrappers over the shared resolver in filesystem.c. */
+static int path_to_inode(struct filesystem *fs, const char *path, uint32_t *ino)
+{
+    return fs_resolve_path(fs, path, ino);
+}
+
 static int resolve_parent(struct filesystem *fs, const char *path,
                           uint32_t *parent_ino, char *name, size_t name_len)
 {
-    (void)name_len;
-    if (!path || path[0] != '/')
-        return JFS_ERR_INVAL;
-
-    const char *last = strrchr(path, '/');
-    if (!last)
-        return JFS_ERR_INVAL;
-
-    const char *nm = last + 1;
-    size_t nlen = strlen(nm);
-    if (nlen == 0 || nlen > JFS_NAME_MAX)
-        return JFS_ERR_INVAL;
-    memcpy(name, nm, nlen);
-    name[nlen] = '\0';
-
-    if (last == path) {
-        *parent_ino = JFS_ROOT_INODE;
-        return JFS_OK;
-    }
-
-    size_t plen = (size_t)(last - path);
-    char ppath[plen + 1];
-    memcpy(ppath, path, plen);
-    ppath[plen] = '\0';
-
-    uint32_t cur = JFS_ROOT_INODE;
-    const char *p = ppath + 1;
-    while (*p) {
-        size_t len = 0;
-        while (p[len] && p[len] != '/')
-            len++;
-        if (len == 0) {
-            p++;
-            continue;
-        }
-        char comp[JFS_NAME_MAX + 1];
-        memcpy(comp, p, len);
-        comp[len] = '\0';
-
-        uint32_t next;
-        int rc = fs_lookup(fs, cur, comp, &next);
-        if (rc != JFS_OK)
-            return rc;
-        cur = next;
-        p += len;
-        while (*p == '/')
-            p++;
-    }
-
-    *parent_ino = cur;
-    return JFS_OK;
-}
-
-/* Resolve a full path ("/" or "/a/b") to its inode number. */
-static int path_to_inode(struct filesystem *fs, const char *path, uint32_t *ino)
-{
-    if (!fs || !path || !ino)
-        return JFS_ERR_INVAL;
-    if (strcmp(path, "/") == 0) {
-        *ino = JFS_ROOT_INODE;
-        return JFS_OK;
-    }
-
-    uint32_t parent;
-    char name[JFS_NAME_MAX + 1];
-    int rc = resolve_parent(fs, path, &parent, name, sizeof(name));
-    if (rc != JFS_OK)
-        return rc;
-    if (name[0] == '\0')
-        return JFS_ERR_INVAL;
-
-    return fs_lookup(fs, parent, name, ino);
+    return fs_resolve_parent(fs, path, parent_ino, name, name_len);
 }
 
 /* ------------------------------------------------------------------ */
@@ -142,7 +77,9 @@ static int cmd_mkfs(const char *path)
     return mkfs_format(path);
 }
 
-static int cmd_create(struct filesystem *fs, const char *path)
+/* create and mkdir differ only in type + mode. */
+static int cmd_mk(struct filesystem *fs, const char *path,
+                  uint32_t type, uint32_t mode)
 {
     uint32_t parent;
     char name[JFS_NAME_MAX + 1];
@@ -155,23 +92,17 @@ static int cmd_create(struct filesystem *fs, const char *path)
         return JFS_ERR_EXIST;
 
     uint32_t ino;
-    return fs_create(fs, parent, name, JFS_TYPE_FILE, 0644, &ino);
+    return fs_create(fs, parent, name, type, mode, &ino);
+}
+
+static int cmd_create(struct filesystem *fs, const char *path)
+{
+    return cmd_mk(fs, path, JFS_TYPE_FILE, 0644);
 }
 
 static int cmd_mkdir(struct filesystem *fs, const char *path)
 {
-    uint32_t parent;
-    char name[JFS_NAME_MAX + 1];
-    int rc = resolve_parent(fs, path, &parent, name, sizeof(name));
-    if (rc != JFS_OK)
-        return rc;
-
-    uint32_t existing;
-    if (fs_lookup(fs, parent, name, &existing) == JFS_OK)
-        return JFS_ERR_EXIST;
-
-    uint32_t ino;
-    return fs_create(fs, parent, name, JFS_TYPE_DIR, 0755, &ino);
+    return cmd_mk(fs, path, JFS_TYPE_DIR, 0755);
 }
 
 static int cmd_write(struct filesystem *fs, const char *path,
@@ -190,7 +121,6 @@ static int cmd_write(struct filesystem *fs, const char *path,
             return rc;
     }
 
-    apply_crash_point(fs);
     return fs_write_data(fs, ino, data, len, 0);
 }
 
@@ -218,7 +148,8 @@ static int cmd_read(struct filesystem *fs, const char *path, FILE *out)
     return rc;
 }
 
-static int cmd_rm(struct filesystem *fs, const char *path)
+/* rm and rmdir differ only in which filesystem call they make. */
+static int cmd_rm_dir(struct filesystem *fs, const char *path, int is_dir)
 {
     uint32_t parent;
     char name[JFS_NAME_MAX + 1];
@@ -227,62 +158,34 @@ static int cmd_rm(struct filesystem *fs, const char *path)
         return rc;
     if (name[0] == '\0')
         return JFS_ERR_INVAL;
-    apply_crash_point(fs);
-    return fs_unlink(fs, parent, name);
+
+    return is_dir ? fs_rmdir(fs, parent, name)
+                  : fs_unlink(fs, parent, name);
+}
+
+static int cmd_rm(struct filesystem *fs, const char *path)
+{
+    return cmd_rm_dir(fs, path, 0);
 }
 
 static int cmd_rmdir(struct filesystem *fs, const char *path)
 {
-    uint32_t parent;
-    char name[JFS_NAME_MAX + 1];
-    int rc = resolve_parent(fs, path, &parent, name, sizeof(name));
-    if (rc != JFS_OK)
-        return rc;
-    if (name[0] == '\0')
-        return JFS_ERR_INVAL;
-    return fs_rmdir(fs, parent, name);
+    return cmd_rm_dir(fs, path, 1);
 }
 
 static int cmd_mv(struct filesystem *fs, const char *oldp, const char *newp)
 {
     uint32_t old_parent, new_parent;
     char old_name[JFS_NAME_MAX + 1], new_name[JFS_NAME_MAX + 1];
+
     int rc = resolve_parent(fs, oldp, &old_parent, old_name, sizeof(old_name));
     if (rc != JFS_OK)
         return rc;
     rc = resolve_parent(fs, newp, &new_parent, new_name, sizeof(new_name));
     if (rc != JFS_OK)
         return rc;
-    if (old_name[0] == '\0' || new_name[0] == '\0')
-        return JFS_ERR_INVAL;
 
-    uint32_t ino;
-    rc = fs_lookup(fs, old_parent, old_name, &ino);
-    if (rc != JFS_OK)
-        return rc;
-
-    struct inode in;
-    rc = fs_read_inode(fs, ino, &in);
-    if (rc != JFS_OK)
-        return rc;
-
-    tx_manager_lock(fs->tm);
-
-    struct transaction tx;
-    rc = tx_begin(fs->tm, &tx);
-    if (rc != JFS_OK) {
-        tx_manager_unlock(fs->tm);
-        return rc;
-    }
-
-    rc = fs_dir_remove(fs, &tx, old_parent, old_name);
-    if (rc == JFS_OK)
-        rc = fs_dir_add(fs, &tx, new_parent, new_name, ino, in.type);
-    if (rc == JFS_OK)
-        rc = tx_commit(&tx);
-
-    tx_manager_unlock(fs->tm);
-    return rc;
+    return fs_rename(fs, old_parent, new_parent, old_name, new_name);
 }
 
 static int cmd_ls(struct filesystem *fs, const char *path)
@@ -442,9 +345,6 @@ static int run_cli(const char *image, int argc, char **argv)
         ret = fsck_check(d, &rep, 0);
         printf("%s: %s (issues=%08x)\n", ret == FSCK_OK ? "OK" : "ISSUES",
                rep.message, rep.issues);
-    } else if (strcmp(cmd, "write-bin") == 0 && argc >= 3) {
-        /* write a file whose contents are the raw bytes of argv[2] */
-        ret = cmd_write(fs, argv[1], argv[2], strlen(argv[2]));
     } else {
         fprintf(stderr, "journalfs: unknown command '%s'\n", cmd);
         ret = 2;

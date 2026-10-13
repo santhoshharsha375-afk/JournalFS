@@ -62,7 +62,7 @@ offset  size  field
 0x28    8     atime / mtime / ctime
 0x40    4     block_count
 0x44    48    direct[12]   (data-block indices; JFS_BLOCK_FREE = free)
-0x5C    4     indirect     (indirect-block index; JFS_BLOCK_FREE = none)
+0x5C    4     indirect     (reserved, always JFS_BLOCK_FREE; kept for layout)
 0x60    4     pad
 0x64    4     crc
 0x68    ...   zero padding to 256
@@ -70,6 +70,12 @@ offset  size  field
 
 `JFS_BLOCK_FREE = 0xFFFFFFFF` marks an unused slot.  Zero is a valid data-block
 index, so it cannot mean "free".
+
+**File size limit: 12 direct blocks x 4096 = 48 KB.**  JournalFS has no
+indirect block: the 13th block allocation reports `JFS_ERR_NOSPC` and writes
+past 48 KB report `JFS_ERR_TOOLARGE`.  The `indirect` field stays on disk so
+the inode layout (and therefore `sizeof(struct inode)`) is unchanged, but it
+is always `JFS_BLOCK_FREE` and `fsck` flags any other value as corruption.
 
 ## Directory entry (256 bytes)
 

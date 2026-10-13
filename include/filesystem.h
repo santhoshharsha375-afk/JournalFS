@@ -45,6 +45,11 @@ int fs_stage_alloc_block(struct filesystem *fs, struct transaction *tx,
 int fs_stage_free_block(struct filesystem *fs, struct transaction *tx,
                          uint32_t block);
 
+/* ---- path resolution (shared by FUSE and CLI) ----------------------- */
+int fs_resolve_path(struct filesystem *fs, const char *path, uint32_t *ino);
+int fs_resolve_parent(struct filesystem *fs, const char *path,
+                      uint32_t *parent_ino, char *name, size_t name_len);
+
 /* ---- directory helpers -------------------------------------------- */
 int fs_lookup(struct filesystem *fs, uint32_t dir_ino, const char *name,
               uint32_t *out_ino);

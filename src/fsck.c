@@ -16,6 +16,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
+
+/* Record an issue bit and its human-readable description.  Repeated 11
+ * times inline before; the last message written wins, as before. */
+static void fsck_report(struct fsck_report *rep, uint32_t issue,
+                        const char *fmt, ...)
+{
+    rep->issues |= issue;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(rep->message, sizeof(rep->message), fmt, ap);
+    va_end(ap);
+}
 
 /* Per-inode record used while walking the inode table. */
 struct fsck_inode {
@@ -30,9 +43,8 @@ static int check_superblock(struct disk *d, struct fsck_report *rep)
 {
     struct superblock sb;
     if (disk_read_superblock(d, &sb) != JFS_OK) {
-        rep->issues |= FSCK_ISSUE_SUPERBLOCK;
-        snprintf(rep->message, sizeof(rep->message),
-                 "superblock failed CRC or format validation");
+        fsck_report(rep, FSCK_ISSUE_SUPERBLOCK,
+                    "superblock failed CRC or format validation");
         return FSCK_ERR_CORRUPT;
     }
 
@@ -41,9 +53,8 @@ static int check_superblock(struct disk *d, struct fsck_report *rep)
         sb.journal_start != JOURNAL_START ||
         sb.data_start != DATA_START ||
         sb.total_blocks != TOTAL_BLOCKS) {
-        rep->issues |= FSCK_ISSUE_SUPERBLOCK;
-        snprintf(rep->message, sizeof(rep->message),
-                 "superblock layout fields are inconsistent");
+        fsck_report(rep, FSCK_ISSUE_SUPERBLOCK,
+                    "superblock layout fields are inconsistent");
         return FSCK_ERR_CORRUPT;
     }
     return FSCK_OK;
@@ -96,11 +107,9 @@ int fsck_check(struct disk *d, struct fsck_report *rep, int repair)
             /* Verify the inode's own CRC. */
             uint32_t stored = in->crc;
             uint32_t computed = jfs_crc32(in, offsetof(struct inode, crc));
-            if (stored != computed) {
-                rep->issues |= FSCK_ISSUE_INODE;
-                snprintf(rep->message, sizeof(rep->message),
-                         "inode %u has a bad CRC", ino);
-            }
+            if (stored != computed)
+                fsck_report(rep, FSCK_ISSUE_INODE,
+                            "inode %u has a bad CRC", ino);
 
             inodes[ino].ino = ino;
             inodes[ino].type = in->type;
@@ -130,67 +139,41 @@ int fsck_check(struct disk *d, struct fsck_report *rep, int repair)
             if (blk == JFS_BLOCK_FREE)
                 continue;
             if (blk >= DATA_BLOCK_COUNT) {
-                rep->issues |= FSCK_ISSUE_BLOCK_REF;
-                snprintf(rep->message, sizeof(rep->message),
-                         "inode %u references out-of-range block %u", ino, blk);
+                fsck_report(rep, FSCK_ISSUE_BLOCK_REF,
+                            "inode %u references out-of-range block %u", ino, blk);
                 continue;
             }
-            if (owner[blk] != 0 && owner[blk] != ino) {
-                rep->issues |= FSCK_ISSUE_DUP_OWNER;
-                snprintf(rep->message, sizeof(rep->message),
-                         "block %u is owned by both inode %u and %u",
-                         blk, owner[blk], ino);
-            }
+            if (owner[blk] != 0 && owner[blk] != ino)
+                fsck_report(rep, FSCK_ISSUE_DUP_OWNER,
+                            "block %u is owned by both inode %u and %u",
+                            blk, owner[blk], ino);
             owner[blk] = ino;
         }
 
-        /* Indirect blocks. */
-        if (fi->block_count > JFS_NDIRECT && fi->indirect != JFS_BLOCK_FREE) {
-            uint32_t ind = fi->indirect;
-            if (ind >= DATA_BLOCK_COUNT) {
-                rep->issues |= FSCK_ISSUE_BLOCK_REF;
-                snprintf(rep->message, sizeof(rep->message),
-                         "inode %u references out-of-range indirect block %u",
-                         ino, ind);
-            } else {
-                if (owner[ind] != 0 && owner[ind] != ino) {
-                    rep->issues |= FSCK_ISSUE_DUP_OWNER;
-                }
-                owner[ind] = ino;
-            }
-
-            uint8_t ind_block[BLOCK_SIZE];
-            if (disk_read_block(d, DATA_START + ind, ind_block) == JFS_OK) {
-                uint32_t *entries = (uint32_t *)ind_block;
-                for (uint32_t k = JFS_NDIRECT; k < fi->block_count; k++) {
-                    uint32_t blk = entries[k - JFS_NDIRECT];
-                    if (blk == JFS_BLOCK_FREE)
-                        continue;
-                    if (blk >= DATA_BLOCK_COUNT) {
-                        rep->issues |= FSCK_ISSUE_BLOCK_REF;
-                        continue;
-                    }
-                    if (owner[blk] != 0 && owner[blk] != ino) {
-                        rep->issues |= FSCK_ISSUE_DUP_OWNER;
-                    }
-                    owner[blk] = ino;
-                }
-            }
+        /* Files are capped at JFS_NDIRECT direct blocks; there is no
+         * indirect block, so anything beyond that is corruption. */
+        if (fi->block_count > JFS_NDIRECT) {
+            fsck_report(rep, FSCK_ISSUE_BLOCK_REF,
+                        "inode %u claims %u blocks but only %u direct slots exist",
+                        ino, fi->block_count, JFS_NDIRECT);
+            fi->block_count = JFS_NDIRECT;
         }
+        if (fi->indirect != JFS_BLOCK_FREE)
+            fsck_report(rep, FSCK_ISSUE_BLOCK_REF,
+                        "inode %u has an unexpected indirect block %u",
+                        ino, fi->indirect);
     }
 
     /* ---- Bitmap vs ownership consistency ----------------------------- */
     for (uint32_t i = 0; i < DATA_BLOCK_COUNT; i++) {
         int allocated = (bitmap[i / 8u] >> (i % 8u)) & 1u;
         if (owner[i] != 0 && !allocated) {
-            rep->issues |= FSCK_ISSUE_BITMAP;
-            snprintf(rep->message, sizeof(rep->message),
-                     "block %u is owned by inode %u but not marked allocated",
-                     i, owner[i]);
+            fsck_report(rep, FSCK_ISSUE_BITMAP,
+                        "block %u is owned by inode %u but not marked allocated",
+                        i, owner[i]);
         } else if (owner[i] == 0 && allocated) {
-            rep->issues |= FSCK_ISSUE_ORPHAN;
-            snprintf(rep->message, sizeof(rep->message),
-                     "block %u is allocated but has no owner (orphan)", i);
+            fsck_report(rep, FSCK_ISSUE_ORPHAN,
+                        "block %u is allocated but has no owner (orphan)", i);
         }
     }
 
@@ -215,18 +198,15 @@ int fsck_check(struct disk *d, struct fsck_report *rep, int repair)
                 if (de->ino >= INODE_COUNT ||
                     (inodes[de->ino].type != JFS_TYPE_FILE &&
                      inodes[de->ino].type != JFS_TYPE_DIR)) {
-                    rep->issues |= FSCK_ISSUE_DIRENT;
-                    snprintf(rep->message, sizeof(rep->message),
-                             "directory %u references missing inode %u",
-                             ino, de->ino);
+                    fsck_report(rep, FSCK_ISSUE_DIRENT,
+                                "directory %u references missing inode %u",
+                                ino, de->ino);
                     continue;
                 }
-                if (de->type != inodes[de->ino].type) {
-                    rep->issues |= FSCK_ISSUE_DIRENT;
-                    snprintf(rep->message, sizeof(rep->message),
-                             "directory %u entry '%.64s' type mismatch with inode %u",
-                             ino, de->name, de->ino);
-                }
+                if (de->type != inodes[de->ino].type)
+                    fsck_report(rep, FSCK_ISSUE_DIRENT,
+                                "directory %u entry '%.64s' type mismatch with inode %u",
+                                ino, de->name, de->ino);
             }
         }
     }
@@ -235,7 +215,6 @@ int fsck_check(struct disk *d, struct fsck_report *rep, int repair)
     uint8_t scratch[JREC_MAX_PAYLOAD];
     uint32_t valid = 0;
     uint32_t corrupt = 0;
-    uint32_t max_txid = 0;
 
     for (uint32_t slot = 0; slot < JOURNAL_SLOTS; slot++) {
         struct journal_record rec;
@@ -247,18 +226,14 @@ int fsck_check(struct disk *d, struct fsck_report *rep, int repair)
             continue;
         }
         valid++;
-        if (rec.txid > max_txid)
-            max_txid = rec.txid;
         if (rec.txid > rep->committed_tx)
             rep->committed_tx = rec.txid;
     }
 
     rep->journal_records = valid;
-    if (corrupt > 0) {
-        rep->issues |= FSCK_ISSUE_JOURNAL;
-        snprintf(rep->message, sizeof(rep->message),
-                 "%u corrupt journal slot(s)", corrupt);
-    }
+    if (corrupt > 0)
+        fsck_report(rep, FSCK_ISSUE_JOURNAL,
+                    "%u corrupt journal slot(s)", corrupt);
 
     /* Committed transactions beyond the last checkpoint need replay. */
     if (rep->committed_tx > sb.last_checkpointed_txid) {

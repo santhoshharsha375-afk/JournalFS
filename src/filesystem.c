@@ -13,9 +13,7 @@
 #include <stdio.h>
 #include <time.h>
 
-/* ------------------------------------------------------------------ */
 /* Low-level block staging helpers                                    */
-/* ------------------------------------------------------------------ */
 
 /* Read a block for modification.  If the block is already staged in this
  * transaction, the staged copy is returned so that earlier modifications are
@@ -35,6 +33,39 @@ static int stage_block_read(struct filesystem *fs, struct transaction *tx,
 static void inode_update_crc(struct inode *in)
 {
     in->crc = jfs_crc32(in, offsetof(struct inode, crc));
+}
+
+/* Stamp mtime/ctime with now and refresh the CRC. */
+static void inode_touch(struct inode *in)
+{
+    in->mtime = (uint64_t)time(NULL);
+    in->ctime = in->mtime;
+    inode_update_crc(in);
+}
+
+/* Free an inode: wipe its table slot and return it to the free pool. */
+static int inode_free(struct filesystem *fs, struct transaction *tx,
+                      uint32_t ino)
+{
+    struct inode free_in;
+    memset(&free_in, 0, sizeof(free_in));
+    int rc = fs_stage_inode(fs, tx, ino, &free_in);
+    if (rc != JFS_OK)
+        return rc;
+    fs->tm->sb.free_inodes++;
+    return JFS_OK;
+}
+
+/* Release every data block an inode still owns. */
+static int free_data_blocks(struct filesystem *fs, struct transaction *tx,
+                            const struct inode *in)
+{
+    for (uint32_t b = 0; b < in->block_count; b++) {
+        int rc = fs_stage_free_block(fs, tx, in->direct[b]);
+        if (rc != JFS_OK)
+            return rc;
+    }
+    return JFS_OK;
 }
 
 int fs_read_inode(struct filesystem *fs, uint32_t ino, struct inode *out)
@@ -131,39 +162,17 @@ int fs_stage_alloc_block(struct filesystem *fs, struct transaction *tx,
     return JFS_OK;
 }
 
-/* Append a newly allocated data block to an inode, allocating the indirect
- * block when the direct slots run out.  Shared by fs_dir_add and fs_truncate. */
+/* Append a newly allocated data block to an inode.  Files are capped at
+ * JFS_NDIRECT direct blocks (48 KB); there is no indirect block, so the
+ * 13th allocation reports out of space.  Shared by fs_dir_add and
+ * fs_truncate. */
 static int link_block(struct filesystem *fs, struct transaction *tx,
                       struct inode *in, uint32_t blk)
 {
-    if (in->block_count < JFS_NDIRECT) {
-        in->direct[in->block_count] = blk;
-    } else if (in->block_count == JFS_NDIRECT) {
-        uint32_t ind;
-        int rc = fs_stage_alloc_block(fs, tx, &ind);
-        if (rc != JFS_OK)
-            return rc;
-        uint8_t ind_block[BLOCK_SIZE];
-        memset(ind_block, 0, sizeof(ind_block));
-        uint32_t *e = (uint32_t *)ind_block;
-        for (uint32_t k = 0; k < JFS_NDIRECT; k++)
-            e[k] = in->direct[k];
-        e[JFS_NDIRECT] = blk;
-        rc = tx_stage_update(tx, DATA_START + ind, ind_block);
-        if (rc != JFS_OK)
-            return rc;
-        in->indirect = ind;
-    } else {
-        uint8_t ind_block[BLOCK_SIZE];
-        uint32_t ind_img = DATA_START + in->indirect;
-        int rc = stage_block_read(fs, tx, ind_img, ind_block);
-        if (rc != JFS_OK)
-            return rc;
-        ((uint32_t *)ind_block)[in->block_count - JFS_NDIRECT] = blk;
-        rc = tx_stage_update(tx, ind_img, ind_block);
-        if (rc != JFS_OK)
-            return rc;
-    }
+    if (in->block_count >= JFS_NDIRECT)
+        return JFS_ERR_NOSPC;
+
+    in->direct[in->block_count] = blk;
     in->block_count++;
     return JFS_OK;
 }
@@ -191,9 +200,7 @@ int fs_stage_free_block(struct filesystem *fs, struct transaction *tx,
     return JFS_OK;
 }
 
-/* ------------------------------------------------------------------ */
 /* Inode allocation                                                   */
-/* ------------------------------------------------------------------ */
 
 int fs_alloc_inode(struct filesystem *fs, struct transaction *tx,
                    uint32_t type, uint32_t mode, uint32_t *out_ino)
@@ -246,9 +253,7 @@ int fs_alloc_inode(struct filesystem *fs, struct transaction *tx,
     return JFS_ERR_NOSPC;
 }
 
-/* ------------------------------------------------------------------ */
 /* Directory helpers                                                  */
-/* ------------------------------------------------------------------ */
 
 int fs_lookup(struct filesystem *fs, uint32_t dir_ino, const char *name,
               uint32_t *out_ino)
@@ -291,6 +296,18 @@ out:
     return rc;
 }
 
+/* Populate a dirent slot.  Used both when reusing a free slot and when
+ * starting a freshly allocated directory block. */
+static void dirent_fill(struct dirent *de, uint32_t ino, uint32_t type,
+                        const char *name, size_t name_len)
+{
+    memset(de, 0, sizeof(*de));
+    de->ino = ino;
+    de->type = type;
+    de->name_len = (uint16_t)name_len;
+    memcpy(de->name, name, name_len);
+}
+
 /* Add a dirent to a directory, allocating a new directory block if needed.
  * Stages every modified block into tx. */
 int fs_dir_add(struct filesystem *fs, struct transaction *tx,
@@ -325,12 +342,7 @@ int fs_dir_add(struct filesystem *fs, struct transaction *tx,
         for (uint32_t i = 0; i < DIRENTS_PER_BLOCK; i++) {
             struct dirent *de = (struct dirent *)(block + i * sizeof(*de));
             if (de->ino == 0) {
-                de->ino = ino;
-                de->type = type;
-                de->name_len = (uint16_t)name_len;
-                de->flags = 0;
-                memset(de->name, 0, JFS_NAME_MAX);
-                memcpy(de->name, name, name_len);
+                dirent_fill(de, ino, type, name, name_len);
                 found = 1;
                 break;
             }
@@ -350,12 +362,7 @@ int fs_dir_add(struct filesystem *fs, struct transaction *tx,
             return rc;
 
         memset(block, 0, BLOCK_SIZE);
-        struct dirent *de = (struct dirent *)block;
-        de->ino = ino;
-        de->type = type;
-        de->name_len = (uint16_t)name_len;
-        de->flags = 0;
-        memcpy(de->name, name, name_len);
+        dirent_fill((struct dirent *)block, ino, type, name, name_len);
 
         rc = tx_stage_update(tx, DATA_START + new_block, block);
         if (rc != JFS_OK)
@@ -367,9 +374,7 @@ int fs_dir_add(struct filesystem *fs, struct transaction *tx,
     }
 
     dir.size += (uint64_t)sizeof(struct dirent);
-    dir.mtime = (uint64_t)time(NULL);
-    dir.ctime = dir.mtime;
-    inode_update_crc(&dir);
+    inode_touch(&dir);
     return fs_stage_inode(fs, tx, dir_ino, &dir);
 }
 
@@ -407,9 +412,7 @@ int fs_dir_remove(struct filesystem *fs, struct transaction *tx,
                     return rc;
 
                 dir.size -= (uint64_t)sizeof(struct dirent);
-                dir.mtime = (uint64_t)time(NULL);
-                dir.ctime = dir.mtime;
-                inode_update_crc(&dir);
+                inode_touch(&dir);
                 rc = fs_stage_inode(fs, tx, dir_ino, &dir);
                 if (rc != JFS_OK)
                     return rc;
@@ -420,9 +423,62 @@ int fs_dir_remove(struct filesystem *fs, struct transaction *tx,
     return JFS_ERR_NOENT;
 }
 
-/* ------------------------------------------------------------------ */
+/* Path resolution (shared by the FUSE and CLI front-ends)             */
+
+int fs_resolve_path(struct filesystem *fs, const char *path, uint32_t *ino);
+
+/* Split "/a/b/c" into the parent directory inode and the final name. */
+int fs_resolve_parent(struct filesystem *fs, const char *path,
+                      uint32_t *parent_ino, char *name, size_t name_len)
+{
+    if (!fs || !path || path[0] != '/' || !parent_ino || !name)
+        return JFS_ERR_INVAL;
+
+    const char *slash = strrchr(path, '/');
+    if (!slash)
+        return JFS_ERR_INVAL;
+
+    /* Copy the directory part ("/a/b") and NUL-terminate it. */
+    size_t plen = (size_t)(slash - path);
+    char parent_path[plen + 1];
+    memcpy(parent_path, path, plen);
+    parent_path[plen] = '\0';
+
+    /* An empty directory part means we are at the root ("/name"). */
+    int rc = (plen == 0) ? JFS_OK
+                         : fs_resolve_path(fs, parent_path, parent_ino);
+    if (rc != JFS_OK)
+        return rc;
+    if (plen == 0)
+        *parent_ino = JFS_ROOT_INODE;
+
+    size_t nlen = strlen(slash + 1);
+    if (nlen == 0 || nlen > JFS_NAME_MAX || nlen >= name_len)
+        return JFS_ERR_INVAL;
+    memcpy(name, slash + 1, nlen);
+    name[nlen] = '\0';
+    return JFS_OK;
+}
+
+/* Resolve a full path ("/" or "/a/b") to its inode number. */
+int fs_resolve_path(struct filesystem *fs, const char *path, uint32_t *ino)
+{
+    if (!fs || !path || path[0] != '/' || !ino)
+        return JFS_ERR_INVAL;
+    if (path[1] == '\0') {
+        *ino = JFS_ROOT_INODE;
+        return JFS_OK;
+    }
+
+    uint32_t parent;
+    char name[JFS_NAME_MAX + 1];
+    int rc = fs_resolve_parent(fs, path, &parent, name, sizeof(name));
+    if (rc != JFS_OK)
+        return rc;
+    return fs_lookup(fs, parent, name, ino);
+}
+
 /* High-level operations                                              */
-/* ------------------------------------------------------------------ */
 
 int fs_create(struct filesystem *fs, uint32_t dir_ino, const char *name,
               uint32_t type, uint32_t mode, uint32_t *out_ino)
@@ -458,7 +514,12 @@ out:
     return rc;
 }
 
-int fs_unlink(struct filesystem *fs, uint32_t dir_ino, const char *name)
+/* Shared body of fs_unlink and fs_rmdir.  The two differ only in the type
+ * they expect, the error reported on a type mismatch, and rmdir's extra
+ * non-empty check. */
+static int remove_entry(struct filesystem *fs, uint32_t dir_ino,
+                        const char *name, uint32_t want_type,
+                        int type_err, int require_empty)
 {
     if (!fs || !name)
         return JFS_ERR_INVAL;
@@ -479,81 +540,12 @@ int fs_unlink(struct filesystem *fs, uint32_t dir_ino, const char *name)
     rc = fs_read_inode(fs, ino, &in);
     if (rc != JFS_OK)
         goto out;
-    if (in.type != JFS_TYPE_FILE) {
-        rc = JFS_ERR_ISDIR;
+    if (in.type != want_type) {
+        rc = type_err;
         goto out;
     }
 
-    rc = fs_dir_remove(fs, &tx, dir_ino, name);
-    if (rc != JFS_OK)
-        goto out;
-
-    /* Free the inode's data blocks. */
-    for (uint32_t b = 0; b < in.block_count; b++) {
-        rc = fs_stage_free_block(fs, &tx, in.direct[b]);
-        if (rc != JFS_OK)
-            goto out;
-    }
-    if (in.indirect != JFS_BLOCK_FREE) {
-        uint8_t ind_block[BLOCK_SIZE];
-        rc = disk_read_block(fs->tm->disk, DATA_START + in.indirect, ind_block);
-        if (rc != JFS_OK)
-            goto out;
-        uint32_t *entries = (uint32_t *)ind_block;
-        for (uint32_t k = 0; k < JFS_INDIRECT_BLOCKS; k++) {
-            if (entries[k] == JFS_BLOCK_FREE)
-                break;
-            rc = fs_stage_free_block(fs, &tx, entries[k]);
-            if (rc != JFS_OK)
-                goto out;
-        }
-        rc = fs_stage_free_block(fs, &tx, in.indirect);
-        if (rc != JFS_OK)
-            goto out;
-    }
-
-    /* Mark the inode free. */
-    struct inode free_in;
-    memset(&free_in, 0, sizeof(free_in));
-    rc = fs_stage_inode(fs, &tx, ino, &free_in);
-    if (rc != JFS_OK)
-        goto out;
-
-    fs->tm->sb.free_inodes++;
-    rc = tx_commit(&tx);
-out:
-    tx_manager_unlock(fs->tm);
-    return rc;
-}
-
-int fs_rmdir(struct filesystem *fs, uint32_t dir_ino, const char *name)
-{
-    if (!fs || !name)
-        return JFS_ERR_INVAL;
-
-    tx_manager_lock(fs->tm);
-
-    struct transaction tx;
-    int rc = tx_begin(fs->tm, &tx);
-    if (rc != JFS_OK)
-        goto out;
-
-    uint32_t ino;
-    rc = fs_lookup(fs, dir_ino, name, &ino);
-    if (rc != JFS_OK)
-        goto out;
-
-    struct inode in;
-    rc = fs_read_inode(fs, ino, &in);
-    if (rc != JFS_OK)
-        goto out;
-    if (in.type != JFS_TYPE_DIR) {
-        rc = JFS_ERR_NOTDIR;
-        goto out;
-    }
-
-    /* Refuse to remove a non-empty directory. */
-    if (in.size > (uint64_t)(2 * sizeof(struct dirent))) {
+    if (require_empty && in.size > (uint64_t)(2 * sizeof(struct dirent))) {
         rc = JFS_ERR_NOTEMPTY;
         goto out;
     }
@@ -562,29 +554,28 @@ int fs_rmdir(struct filesystem *fs, uint32_t dir_ino, const char *name)
     if (rc != JFS_OK)
         goto out;
 
-    /* Free the directory's data blocks. */
-    for (uint32_t b = 0; b < in.block_count; b++) {
-        rc = fs_stage_free_block(fs, &tx, in.direct[b]);
-        if (rc != JFS_OK)
-            goto out;
-    }
-    if (in.indirect != JFS_BLOCK_FREE) {
-        rc = fs_stage_free_block(fs, &tx, in.indirect);
-        if (rc != JFS_OK)
-            goto out;
-    }
-
-    struct inode free_in;
-    memset(&free_in, 0, sizeof(free_in));
-    rc = fs_stage_inode(fs, &tx, ino, &free_in);
+    rc = free_data_blocks(fs, &tx, &in);
     if (rc != JFS_OK)
         goto out;
 
-    fs->tm->sb.free_inodes++;
+    rc = inode_free(fs, &tx, ino);
+    if (rc != JFS_OK)
+        goto out;
+
     rc = tx_commit(&tx);
 out:
     tx_manager_unlock(fs->tm);
     return rc;
+}
+
+int fs_unlink(struct filesystem *fs, uint32_t dir_ino, const char *name)
+{
+    return remove_entry(fs, dir_ino, name, JFS_TYPE_FILE, JFS_ERR_ISDIR, 0);
+}
+
+int fs_rmdir(struct filesystem *fs, uint32_t dir_ino, const char *name)
+{
+    return remove_entry(fs, dir_ino, name, JFS_TYPE_DIR, JFS_ERR_NOTDIR, 1);
 }
 
 int fs_rename(struct filesystem *fs, uint32_t old_parent, uint32_t new_parent,
@@ -657,23 +648,8 @@ int fs_truncate(struct filesystem *fs, uint32_t ino, uint64_t size)
         /* Shrink: free surplus blocks. */
         while (in.block_count > new_blocks) {
             uint32_t b = in.block_count - 1;
-            uint32_t blk;
-            if (b < JFS_NDIRECT) {
-                blk = in.direct[b];
-                in.direct[b] = JFS_BLOCK_FREE;
-            } else {
-                uint8_t ind_block[BLOCK_SIZE];
-                uint32_t ind_img = DATA_START + in.indirect;
-                rc = stage_block_read(fs, &tx, ind_img, ind_block);
-                if (rc != JFS_OK)
-                    goto out;
-                uint32_t *entries = (uint32_t *)ind_block;
-                blk = entries[b - JFS_NDIRECT];
-                entries[b - JFS_NDIRECT] = JFS_BLOCK_FREE;
-                rc = tx_stage_update(&tx, ind_img, ind_block);
-                if (rc != JFS_OK)
-                    goto out;
-            }
+            uint32_t blk = in.direct[b];
+            in.direct[b] = JFS_BLOCK_FREE;
             rc = fs_stage_free_block(fs, &tx, blk);
             if (rc != JFS_OK)
                 goto out;
@@ -682,9 +658,7 @@ int fs_truncate(struct filesystem *fs, uint32_t ino, uint64_t size)
     }
 
     in.size = size;
-    in.mtime = (uint64_t)time(NULL);
-    in.ctime = in.mtime;
-    inode_update_crc(&in);
+    inode_touch(&in);
     rc = fs_stage_inode(fs, &tx, ino, &in);
     if (rc != JFS_OK)
         goto out;
@@ -695,34 +669,18 @@ out:
     return rc;
 }
 
-/* ------------------------------------------------------------------ */
 /* Data I/O                                                           */
-/* ------------------------------------------------------------------ */
 
 /* Resolve a file block index to an image block number. */
 static int resolve_file_block(struct filesystem *fs, struct inode *in,
                               uint32_t bi, uint32_t *img_block)
 {
-    if (bi < JFS_NDIRECT) {
-        if (in->direct[bi] == JFS_BLOCK_FREE)
-            return JFS_ERR_INVAL;
-        *img_block = DATA_START + in->direct[bi];
-        return JFS_OK;
-    }
-    uint32_t idx = bi - JFS_NDIRECT;
-    if (idx >= JFS_INDIRECT_BLOCKS)
-        return JFS_ERR_TOOLARGE;
-    if (in->indirect == JFS_BLOCK_FREE)
+    if (bi >= JFS_NDIRECT)
+        return JFS_ERR_TOOLARGE;        /* 48 KB file size limit */
+    if (in->direct[bi] == JFS_BLOCK_FREE)
         return JFS_ERR_INVAL;
 
-    uint8_t ind_block[BLOCK_SIZE];
-    int rc = disk_read_block(fs->tm->disk, DATA_START + in->indirect, ind_block);
-    if (rc != JFS_OK)
-        return rc;
-    uint32_t *entries = (uint32_t *)ind_block;
-    if (entries[idx] == JFS_BLOCK_FREE)
-        return JFS_ERR_INVAL;
-    *img_block = DATA_START + entries[idx];
+    *img_block = DATA_START + in->direct[bi];
     return JFS_OK;
 }
 
@@ -814,16 +772,6 @@ int fs_write_data(struct filesystem *fs, uint32_t ino, const void *buf,
     if (rc != JFS_OK)
         goto out;
 
-    uint8_t ind_block[BLOCK_SIZE];
-    memset(ind_block, 0, sizeof(ind_block));
-    int have_ind = 0;
-    if (in.indirect != JFS_BLOCK_FREE) {
-        rc = disk_read_block(fs->tm->disk, DATA_START + in.indirect, ind_block);
-        if (rc != JFS_OK)
-            goto out;
-        have_ind = 1;
-    }
-
     const uint8_t *in_buf = (const uint8_t *)buf;
     size_t done = 0;
     uint64_t pos = offset;
@@ -835,49 +783,20 @@ int fs_write_data(struct filesystem *fs, uint32_t ino, const void *buf,
         if (chunk > len - done)
             chunk = (uint32_t)(len - done);
 
-        /* Determine whether this file block is already allocated. */
-        uint32_t blk = 0;
-        int need_alloc = 0;
-        if (bi < JFS_NDIRECT) {
-            blk = in.direct[bi];
-            need_alloc = (blk == JFS_BLOCK_FREE);
-        } else {
-            uint32_t idx = bi - JFS_NDIRECT;
-            if (idx >= JFS_INDIRECT_BLOCKS) {
-                rc = JFS_ERR_TOOLARGE;
-                goto out;
-            }
-            if (in.indirect == JFS_BLOCK_FREE) {
-                need_alloc = 1;
-            } else {
-                blk = ((uint32_t *)ind_block)[idx];
-                need_alloc = (blk == JFS_BLOCK_FREE);
-            }
+        if (bi >= JFS_NDIRECT) {
+            rc = JFS_ERR_TOOLARGE;      /* 48 KB file size limit */
+            goto out;
         }
 
-        if (need_alloc) {
+        /* Determine whether this file block is already allocated. */
+        uint32_t blk = in.direct[bi];
+        if (blk == JFS_BLOCK_FREE) {
             rc = bitmap_find_free(bitmap, &blk);
             if (rc != JFS_OK)
                 goto out;
             bitmap_set(bitmap, blk);
             fs->tm->sb.free_blocks--;
-
-            if (bi < JFS_NDIRECT) {
-                in.direct[bi] = blk;
-            } else {
-                if (in.indirect == JFS_BLOCK_FREE) {
-                    uint32_t ind;
-                    rc = bitmap_find_free(bitmap, &ind);
-                    if (rc != JFS_OK)
-                        goto out;
-                    bitmap_set(bitmap, ind);
-                    in.indirect = ind;
-                    memset(ind_block, 0, sizeof(ind_block));
-                    have_ind = 1;
-                    fs->tm->sb.free_blocks--;
-                }
-                ((uint32_t *)ind_block)[bi - JFS_NDIRECT] = blk;
-            }
+            in.direct[bi] = blk;
             if (bi >= in.block_count)
                 in.block_count = bi + 1;
         }
@@ -903,18 +822,11 @@ int fs_write_data(struct filesystem *fs, uint32_t ino, const void *buf,
     rc = tx_stage_update(&tx, BITMAP_START, bitmap);
     if (rc != JFS_OK)
         goto out;
-    if (have_ind) {
-        rc = tx_stage_update(&tx, DATA_START + in.indirect, ind_block);
-        if (rc != JFS_OK)
-            goto out;
-    }
 
     uint64_t new_size = offset + len;
     if (new_size > in.size)
         in.size = new_size;
-    in.mtime = (uint64_t)time(NULL);
-    in.ctime = in.mtime;
-    inode_update_crc(&in);
+    inode_touch(&in);
     rc = fs_stage_inode(fs, &tx, ino, &in);
     if (rc != JFS_OK)
         goto out;
@@ -925,9 +837,7 @@ out:
     return rc;
 }
 
-/* ------------------------------------------------------------------ */
 /* Open / close                                                       */
-/* ------------------------------------------------------------------ */
 
 int fs_open(struct filesystem **out, struct disk *d)
 {

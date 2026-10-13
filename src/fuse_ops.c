@@ -51,45 +51,16 @@ static int path_to_ino(const char *path, uint32_t *ino)
 {
     if (!g_fs || !path || !ino)
         return -EINVAL;
+    return jfs_errno(fs_resolve_path(g_fs, path, ino));
+}
 
-    if (strcmp(path, "/") == 0) {
-        *ino = JFS_ROOT_INODE;
-        return 0;
-    }
-
-    uint32_t parent;
-
-    /* Split into parent directory and final component. */
-    const char *slash = strrchr(path, '/');
-    if (!slash)
+/* Split "/a/b" into the parent directory inode and the final name. */
+static int split_parent(const char *path, uint32_t *parent, char *name)
+{
+    if (!g_fs)
         return -EINVAL;
-
-    size_t plen = (size_t)(slash - path);
-    if (plen == 0)
-        plen = 1;                    /* path is "/name" */
-
-    /* Resolve the parent directory. */
-    if (plen == 1 && path[0] == '/') {
-        parent = JFS_ROOT_INODE;
-    } else {
-        char parent_path[plen + 1];
-        memcpy(parent_path, path, plen);
-        parent_path[plen] = '\0';
-        int rc = path_to_ino(parent_path, &parent);
-        if (rc != 0)
-            return rc;
-    }
-
-    const char *nm = slash + 1;
-    if (*nm == '\0')
-        return -EINVAL;
-
-    uint32_t child;
-    int rc = fs_lookup(g_fs, parent, nm, &child);
-    if (rc != JFS_OK)
-        return -ENOENT;
-    *ino = child;
-    return 0;
+    return jfs_errno(fs_resolve_parent(g_fs, path, parent, name,
+                                       JFS_NAME_MAX + 1));
 }
 
 static void inode_to_stat(const struct inode *in, struct stat *st)
@@ -170,81 +141,31 @@ static int jfs_create(const char *path, mode_t mode,
     (void)fi;
     uint32_t parent;
     char name[JFS_NAME_MAX + 1];
-
-    const char *slash = strrchr(path, '/');
-    if (!slash)
-        return -EINVAL;
-    size_t plen = (size_t)(slash - path);
-    char parent_path[plen + 1];
-    memcpy(parent_path, path, plen);
-    parent_path[plen] = '\0';
-
-    int rc = path_to_ino(parent_path[0] ? parent_path : "/", &parent);
+    int rc = split_parent(path, &parent, name);
     if (rc != 0)
         return rc;
-
-    uint32_t nm_len = strlen(slash + 1);
-    if (nm_len == 0 || nm_len > JFS_NAME_MAX)
-        return -EINVAL;
-    memcpy(name, slash + 1, nm_len);
-    name[nm_len] = '\0';
-
-    uint32_t ino;
-    rc = fs_create(g_fs, parent, name, JFS_TYPE_FILE, mode & 07777, &ino);
-    return jfs_errno(rc);
+    return jfs_errno(fs_create(g_fs, parent, name, JFS_TYPE_FILE,
+                               mode & 07777, &(uint32_t){0}));
 }
 
 static int jfs_mkdir(const char *path, mode_t mode)
 {
     uint32_t parent;
     char name[JFS_NAME_MAX + 1];
-
-    const char *slash = strrchr(path, '/');
-    if (!slash)
-        return -EINVAL;
-    size_t plen = (size_t)(slash - path);
-    char parent_path[plen + 1];
-    memcpy(parent_path, path, plen);
-    parent_path[plen] = '\0';
-
-    int rc = path_to_ino(parent_path[0] ? parent_path : "/", &parent);
+    int rc = split_parent(path, &parent, name);
     if (rc != 0)
         return rc;
-
-    uint32_t nm_len = strlen(slash + 1);
-    if (nm_len == 0 || nm_len > JFS_NAME_MAX)
-        return -EINVAL;
-    memcpy(name, slash + 1, nm_len);
-    name[nm_len] = '\0';
-
-    uint32_t ino;
-    rc = fs_create(g_fs, parent, name, JFS_TYPE_DIR, mode & 07777, &ino);
-    return jfs_errno(rc);
+    return jfs_errno(fs_create(g_fs, parent, name, JFS_TYPE_DIR,
+                               mode & 07777, &(uint32_t){0}));
 }
 
 static int jfs_unlink(const char *path)
 {
     uint32_t parent;
     char name[JFS_NAME_MAX + 1];
-
-    const char *slash = strrchr(path, '/');
-    if (!slash)
-        return -EINVAL;
-    size_t plen = (size_t)(slash - path);
-    char parent_path[plen + 1];
-    memcpy(parent_path, path, plen);
-    parent_path[plen] = '\0';
-
-    int rc = path_to_ino(parent_path[0] ? parent_path : "/", &parent);
+    int rc = split_parent(path, &parent, name);
     if (rc != 0)
         return rc;
-
-    uint32_t nm_len = strlen(slash + 1);
-    if (nm_len == 0 || nm_len > JFS_NAME_MAX)
-        return -EINVAL;
-    memcpy(name, slash + 1, nm_len);
-    name[nm_len] = '\0';
-
     return jfs_errno(fs_unlink(g_fs, parent, name));
 }
 
@@ -252,64 +173,24 @@ static int jfs_rmdir(const char *path)
 {
     uint32_t parent;
     char name[JFS_NAME_MAX + 1];
-
-    const char *slash = strrchr(path, '/');
-    if (!slash)
-        return -EINVAL;
-    size_t plen = (size_t)(slash - path);
-    char parent_path[plen + 1];
-    memcpy(parent_path, path, plen);
-    parent_path[plen] = '\0';
-
-    int rc = path_to_ino(parent_path[0] ? parent_path : "/", &parent);
+    int rc = split_parent(path, &parent, name);
     if (rc != 0)
         return rc;
-
-    uint32_t nm_len = strlen(slash + 1);
-    if (nm_len == 0 || nm_len > JFS_NAME_MAX)
-        return -EINVAL;
-    memcpy(name, slash + 1, nm_len);
-    name[nm_len] = '\0';
-
     return jfs_errno(fs_rmdir(g_fs, parent, name));
 }
 
 static int jfs_rename(const char *from, const char *to, unsigned int flags)
 {
     (void)flags;
-
     uint32_t from_parent, to_parent;
     char from_name[JFS_NAME_MAX + 1], to_name[JFS_NAME_MAX + 1];
 
-    const char *fslash = strrchr(from, '/');
-    const char *tslash = strrchr(to, '/');
-    if (!fslash || !tslash)
-        return -EINVAL;
-
-    size_t fplen = (size_t)(fslash - from);
-    char fpath[fplen + 1];
-    memcpy(fpath, from, fplen);
-    fpath[fplen] = '\0';
-    int rc = path_to_ino(fpath[0] ? fpath : "/", &from_parent);
+    int rc = split_parent(from, &from_parent, from_name);
     if (rc != 0)
         return rc;
-
-    size_t tplen = (size_t)(tslash - to);
-    char tpath[tplen + 1];
-    memcpy(tpath, to, tplen);
-    tpath[tplen] = '\0';
-    rc = path_to_ino(tpath[0] ? tpath : "/", &to_parent);
+    rc = split_parent(to, &to_parent, to_name);
     if (rc != 0)
         return rc;
-
-    uint32_t fnlen = strlen(fslash + 1);
-    uint32_t tnlen = strlen(tslash + 1);
-    if (fnlen == 0 || fnlen > JFS_NAME_MAX || tnlen == 0 || tnlen > JFS_NAME_MAX)
-        return -EINVAL;
-    memcpy(from_name, fslash + 1, fnlen);
-    from_name[fnlen] = '\0';
-    memcpy(to_name, tslash + 1, tnlen);
-    to_name[tnlen] = '\0';
 
     return jfs_errno(fs_rename(g_fs, from_parent, to_parent,
                                from_name, to_name));

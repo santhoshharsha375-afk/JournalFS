@@ -1,26 +1,10 @@
 /*
  * recovery.c -- Mount-time crash recovery.
  *
- * When the filesystem is mounted (or the recovery tool is run), the journal
- * is scanned and the on-disk metadata is brought to a consistent state:
- *
- *   1. Validate the superblock.  If its CRC fails, the superblock is
- *      rebuilt from the latest journaled superblock update.
- *   2. Scan every journal slot.  A slot is accepted only if its magic, CRC,
- *      record type, payload length and generation are all valid.
- *   3. Group records by transaction id.  A transaction is only considered
- *      if it has a BEGIN, a contiguous run of UPDATE records, and a COMMIT.
- *      Anything else (torn write, missing record, bad checksum) is
- *      discarded -- it is never replayed as metadata.
- *   4. Transactions whose commit record is durable are committed; the rest
- *      are ignored.
- *   5. Committed transactions newer than the last checkpointed id are
- *      replayed onto their home blocks in transaction order.
- *   6. Replay is idempotent: applying the same block update twice yields
- *      the same bytes, so repeating recovery cannot corrupt the image.
- *   7. The superblock is then persisted with the recovered journal state.
- *
- * Recovery never formats or silently rewrites an existing image.
+ * Scans the journal, groups records by transaction id, and replays only
+ * fully committed transactions in ascending order onto their home blocks.
+ * Replay is idempotent and never formats or silently rewrites an image.
+ * Full procedure: docs/crash_recovery.md.
  */
 #include "transaction.h"
 #include "recovery.h"
@@ -44,15 +28,6 @@ static int cmp_by_txid_seq(const void *a, const void *b)
     const struct scan_record *rb = (const struct scan_record *)b;
     if (ra->txid != rb->txid)
         return (ra->txid < rb->txid) ? -1 : 1;
-    if (ra->seq != rb->seq)
-        return (ra->seq < rb->seq) ? -1 : 1;
-    return 0;
-}
-
-static int cmp_by_seq(const void *a, const void *b)
-{
-    const struct scan_record *ra = (const struct scan_record *)a;
-    const struct scan_record *rb = (const struct scan_record *)b;
     if (ra->seq != rb->seq)
         return (ra->seq < rb->seq) ? -1 : 1;
     return 0;
@@ -129,16 +104,28 @@ int tx_recover(struct tx_manager *tm, char *report, size_t report_len)
     }
     nrec = kept;
 
-    /* --- Step 3: group by transaction and find committed ones --------- */
+    /* Order by (txid, seq) so every transaction forms one contiguous group
+     * whose UPDATE records are already in sequence order. */
     qsort(recs, nrec, sizeof(*recs), cmp_by_txid_seq);
 
-    /* For each txid, verify contiguity and the presence of a COMMIT. */
-    uint32_t *committed = (uint32_t *)calloc(JOURNAL_SLOTS, sizeof(uint32_t));
-    if (!committed) {
-        free(recs);
-        return JFS_ERR_NOMEM;
-    }
+    /* --- Step 3: replay committed transactions, in one pass ------------- */
+    /*
+     * The sort above orders records by (txid, seq), so each transaction is
+     * now a contiguous group already in sequence order.  A transaction is
+     * committed iff its records are contiguous, begin with BEGIN and end with
+     * COMMIT.  We validate and replay each group inline, walking txid order so
+     * the newest update of a block is applied last.
+     *
+     * If the superblock is torn its checkpoint counter is untrustworthy, so
+     * last_checkpointed stays 0 and every committed transaction is replayed.
+     * Replay is idempotent, so that is safe.
+     */
+    uint32_t last_checkpointed = sb_valid ? sb.last_checkpointed_txid : 0;
+
+    uint32_t max_committed = 0;
     size_t ncommitted = 0;
+    uint32_t replayed = 0;
+    uint32_t applied_blocks = 0;
 
     size_t i = 0;
     while (i < nrec) {
@@ -147,8 +134,6 @@ int tx_recover(struct tx_manager *tm, char *report, size_t report_len)
         while (j < nrec && recs[j].txid == txid)
             j++;
 
-        /* Records for this txid are recs[i..j).  Check contiguity and
-         * that the last record is a COMMIT. */
         int contiguous = 1;
         int has_commit = 0;
         for (size_t k = i; k < j; k++) {
@@ -161,65 +146,31 @@ int tx_recover(struct tx_manager *tm, char *report, size_t report_len)
         }
 
         if (contiguous && has_commit && recs[i].type == JREC_TYPE_BEGIN) {
-            committed[ncommitted++] = txid;
+            ncommitted++;
+            if (txid > max_committed)
+                max_committed = txid;
+
+            if (txid > last_checkpointed) {
+                for (size_t k = i; k < j; k++) {
+                    if (recs[k].type != JREC_TYPE_UPDATE)
+                        continue;
+                    struct journal_record rec;
+                    if (journal_read_slot(d, recs[k].slot, &rec,
+                                          scratch, sizeof(scratch)) != 1)
+                        continue;            /* skip unreadable record */
+                    if (disk_write_block(d, recs[k].block, rec.payload) == JFS_OK)
+                        applied_blocks++;
+                }
+                replayed++;
+            }
         }
 
         i = j;
     }
 
-    /* --- Step 4: determine the last checkpointed transaction ----------- */
-    uint32_t last_checkpointed = 0;
-    if (sb_valid)
-        last_checkpointed = sb.last_checkpointed_txid;
-    /*
-     * If the superblock is torn we cannot trust its checkpoint counter, so
-     * we replay every committed transaction.  Replay is idempotent, so this
-     * is safe and guarantees no committed update is left unapplied.
-     */
-
-    /* --- Step 5: replay committed, uncheckpointed transactions --------- */
-    uint32_t replayed = 0;
-    uint32_t applied_blocks = 0;
-
-    for (size_t c = 0; c < ncommitted; c++) {
-        uint32_t txid = committed[c];
-        if (txid <= last_checkpointed)
-            continue;
-
-        /* Collect this transaction's UPDATE records in sequence order. */
-        struct scan_record *upd = (struct scan_record *)calloc(
-            JOURNAL_SLOTS, sizeof(*upd));
-        if (!upd)
-            continue;
-        size_t nupd = 0;
-        for (size_t k = 0; k < nrec; k++) {
-            if (recs[k].txid == txid && recs[k].type == JREC_TYPE_UPDATE)
-                upd[nupd++] = recs[k];
-        }
-        qsort(upd, nupd, sizeof(*upd), cmp_by_seq);
-
-        for (size_t u = 0; u < nupd; u++) {
-            struct journal_record rec;
-            int rc = journal_read_slot(d, upd[u].slot, &rec,
-                                       scratch, sizeof(scratch));
-            if (rc != 1)
-                continue;                /* skip unreadable record */
-            int wrc = disk_write_block(d, upd[u].block, rec.payload);
-            if (wrc == JFS_OK)
-                applied_blocks++;
-        }
-        replayed++;
-        free(upd);
-    }
-
     int rc = disk_fsync(d);
 
-    /* --- Step 6: persist the recovered journal state ------------------- */
-    uint32_t max_committed = 0;
-    for (size_t c = 0; c < ncommitted; c++)
-        if (committed[c] > max_committed)
-            max_committed = committed[c];
-
+    /* --- Step 4: persist the recovered journal state ------------------- */
     tm->state.last_committed = max_committed;
     tm->state.last_txid = (max_committed > 0) ? max_committed
                                               : tm->state.last_txid;
@@ -273,7 +224,6 @@ int tx_recover(struct tx_manager *tm, char *report, size_t report_len)
                  (unsigned)applied_blocks);
     }
 
-    free(committed);
     free(recs);
     return rc;
 }
