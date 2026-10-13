@@ -201,20 +201,6 @@ struct jrec_header {
 uint32_t jfs_crc32(const void *data, size_t len);
 uint32_t jfs_crc32_update(uint32_t crc, const void *data, size_t len);
 
-/* ------------------------------------------------------------------ */
-/* Small helpers                                                       */
-/* ------------------------------------------------------------------ */
-
-static inline uint32_t jfs_min_u32(uint32_t a, uint32_t b)
-{
-    return a < b ? a : b;
-}
-
-static inline uint64_t jfs_min_u64(uint64_t a, uint64_t b)
-{
-    return a < b ? a : b;
-}
-
 #ifdef __cplusplus
 }
 #endif

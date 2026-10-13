@@ -67,9 +67,9 @@
 
   STEP 9 - Speed: journal OFF vs ON
 ----------------------------------------------------------------
-        journal OFF (unsafe baseline): 1018.71 ops/s
-        journal ON  (crash-safe):      258.69 ops/s
-        journal + checkpoint:          268.26 ops/s
+        journal OFF (unsafe baseline): 1250.76 ops/s
+        journal ON  (crash-safe):      322.27 ops/s
+        journal + checkpoint:          309.11 ops/s
         ~3x slower with journal = the price of crash safety.
 
 ============================================================

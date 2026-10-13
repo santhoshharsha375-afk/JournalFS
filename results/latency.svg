@@ -22,26 +22,26 @@
 <line x1="95" y1="70" x2="100" y2="70" stroke="black"/>
 <text x="90" y="74" text-anchor="end" font-size="11">20</text>
 <text x="24" y="235" text-anchor="middle" font-size="12" transform="rotate(-90 24 235)">Latency (ms)</text>
-<rect x="133" y="354" width="49" height="46" fill="#c0392b"/>
-<text x="159" y="350" text-anchor="middle" font-size="10">2.81</text>
+<rect x="133" y="357" width="49" height="43" fill="#c0392b"/>
+<text x="159" y="353" text-anchor="middle" font-size="10">2.66</text>
 <rect x="184" y="356" width="49" height="44" fill="#2980b9"/>
-<text x="210" y="352" text-anchor="middle" font-size="10">2.67</text>
-<rect x="235" y="325" width="49" height="75" fill="#27ae60"/>
-<text x="261" y="321" text-anchor="middle" font-size="10">4.60</text>
+<text x="210" y="352" text-anchor="middle" font-size="10">2.71</text>
+<rect x="235" y="341" width="49" height="59" fill="#27ae60"/>
+<text x="261" y="337" text-anchor="middle" font-size="10">3.58</text>
 <text x="210" y="420" text-anchor="middle" font-size="12">nojournal</text>
-<rect x="353" y="233" width="49" height="167" fill="#c0392b"/>
-<text x="379" y="229" text-anchor="middle" font-size="10">10.14</text>
-<rect x="404" y="235" width="49" height="165" fill="#2980b9"/>
-<text x="430" y="231" text-anchor="middle" font-size="10">10.03</text>
-<rect x="455" y="187" width="49" height="213" fill="#27ae60"/>
-<text x="481" y="183" text-anchor="middle" font-size="10">12.95</text>
+<rect x="353" y="235" width="49" height="165" fill="#c0392b"/>
+<text x="379" y="231" text-anchor="middle" font-size="10">10.00</text>
+<rect x="404" y="241" width="49" height="159" fill="#2980b9"/>
+<text x="430" y="237" text-anchor="middle" font-size="10">9.68</text>
+<rect x="455" y="176" width="49" height="224" fill="#27ae60"/>
+<text x="481" y="172" text-anchor="middle" font-size="10">13.63</text>
 <text x="430" y="420" text-anchor="middle" font-size="12">journal</text>
-<rect x="573" y="230" width="49" height="170" fill="#c0392b"/>
-<text x="599" y="226" text-anchor="middle" font-size="10">10.36</text>
-<rect x="624" y="234" width="49" height="166" fill="#2980b9"/>
-<text x="650" y="230" text-anchor="middle" font-size="10">10.08</text>
-<rect x="675" y="176" width="49" height="224" fill="#27ae60"/>
-<text x="701" y="172" text-anchor="middle" font-size="10">13.60</text>
+<rect x="573" y="233" width="49" height="167" fill="#c0392b"/>
+<text x="599" y="229" text-anchor="middle" font-size="10">10.14</text>
+<rect x="624" y="236" width="49" height="164" fill="#2980b9"/>
+<text x="650" y="232" text-anchor="middle" font-size="10">9.96</text>
+<rect x="675" y="178" width="49" height="222" fill="#27ae60"/>
+<text x="701" y="174" text-anchor="middle" font-size="10">13.46</text>
 <text x="650" y="420" text-anchor="middle" font-size="12">journal_ckpt</text>
 <rect x="100" y="459" width="14" height="14" fill="#c0392b"/>
 <text x="120" y="470" font-size="12">average</text>

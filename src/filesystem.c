@@ -17,13 +17,6 @@
 /* Low-level block staging helpers                                    */
 /* ------------------------------------------------------------------ */
 
-static int stage_whole_block(struct filesystem *fs, struct transaction *tx,
-                             uint32_t block, const void *data)
-{
-    (void)fs;
-    return tx_stage_update(tx, block, data);
-}
-
 /* Read a block for modification.  If the block is already staged in this
  * transaction, the staged copy is returned so that earlier modifications are
  * preserved; otherwise the block is read from disk. */
@@ -79,7 +72,7 @@ int fs_stage_inode(struct filesystem *fs, struct transaction *tx,
         return rc;
 
     memcpy(buf + (ino % INODES_PER_BLOCK) * INODE_SIZE, in, INODE_SIZE);
-    return stage_whole_block(fs, tx, table_block, buf);
+    return tx_stage_update(tx, table_block, buf);
 }
 
 int fs_read_bitmap(struct filesystem *fs, uint8_t *out)
@@ -104,6 +97,14 @@ static int bitmap_test(const uint8_t *bitmap, uint32_t index)
     return (bitmap[index / 8u] >> (index % 8u)) & 1u;
 }
 
+static int bitmap_find_free(const uint8_t *bitmap, uint32_t *out_index)
+{
+    for (uint32_t i = 0; i < DATA_BLOCK_COUNT; i++)
+        if (!bitmap_test(bitmap, i))
+            return *out_index = i, JFS_OK;
+    return JFS_ERR_NOSPC;
+}
+
 int fs_stage_alloc_block(struct filesystem *fs, struct transaction *tx,
                           uint32_t *out)
 {
@@ -115,25 +116,55 @@ int fs_stage_alloc_block(struct filesystem *fs, struct transaction *tx,
     if (rc != JFS_OK)
         return rc;
 
-    uint32_t free_index = 0;
-    int found = 0;
-    for (uint32_t i = 0; i < DATA_BLOCK_COUNT; i++) {
-        if (!bitmap_test(bitmap, i)) {
-            free_index = i;
-            found = 1;
-            break;
-        }
-    }
-    if (!found)
-        return JFS_ERR_NOSPC;
+    uint32_t free_index;
+    rc = bitmap_find_free(bitmap, &free_index);
+    if (rc != JFS_OK)
+        return rc;
 
     bitmap_set(bitmap, free_index);
-    rc = stage_whole_block(fs, tx, BITMAP_START, bitmap);
+    rc = tx_stage_update(tx, BITMAP_START, bitmap);
     if (rc != JFS_OK)
         return rc;
 
     fs->tm->sb.free_blocks--;
     *out = free_index;
+    return JFS_OK;
+}
+
+/* Append a newly allocated data block to an inode, allocating the indirect
+ * block when the direct slots run out.  Shared by fs_dir_add and fs_truncate. */
+static int link_block(struct filesystem *fs, struct transaction *tx,
+                      struct inode *in, uint32_t blk)
+{
+    if (in->block_count < JFS_NDIRECT) {
+        in->direct[in->block_count] = blk;
+    } else if (in->block_count == JFS_NDIRECT) {
+        uint32_t ind;
+        int rc = fs_stage_alloc_block(fs, tx, &ind);
+        if (rc != JFS_OK)
+            return rc;
+        uint8_t ind_block[BLOCK_SIZE];
+        memset(ind_block, 0, sizeof(ind_block));
+        uint32_t *e = (uint32_t *)ind_block;
+        for (uint32_t k = 0; k < JFS_NDIRECT; k++)
+            e[k] = in->direct[k];
+        e[JFS_NDIRECT] = blk;
+        rc = tx_stage_update(tx, DATA_START + ind, ind_block);
+        if (rc != JFS_OK)
+            return rc;
+        in->indirect = ind;
+    } else {
+        uint8_t ind_block[BLOCK_SIZE];
+        uint32_t ind_img = DATA_START + in->indirect;
+        int rc = stage_block_read(fs, tx, ind_img, ind_block);
+        if (rc != JFS_OK)
+            return rc;
+        ((uint32_t *)ind_block)[in->block_count - JFS_NDIRECT] = blk;
+        rc = tx_stage_update(tx, ind_img, ind_block);
+        if (rc != JFS_OK)
+            return rc;
+    }
+    in->block_count++;
     return JFS_OK;
 }
 
@@ -152,7 +183,7 @@ int fs_stage_free_block(struct filesystem *fs, struct transaction *tx,
         return JFS_ERR_INVAL;          /* double free */
 
     bitmap_clear(bitmap, block);
-    rc = stage_whole_block(fs, tx, BITMAP_START, bitmap);
+    rc = tx_stage_update(tx, BITMAP_START, bitmap);
     if (rc != JFS_OK)
         return rc;
 
@@ -305,7 +336,7 @@ int fs_dir_add(struct filesystem *fs, struct transaction *tx,
             }
         }
         if (found) {
-            rc = stage_whole_block(fs, tx, DATA_START + dir.direct[b], block);
+            rc = tx_stage_update(tx, DATA_START + dir.direct[b], block);
             if (rc != JFS_OK)
                 return rc;
         }
@@ -326,44 +357,13 @@ int fs_dir_add(struct filesystem *fs, struct transaction *tx,
         de->flags = 0;
         memcpy(de->name, name, name_len);
 
-        rc = stage_whole_block(fs, tx, DATA_START + new_block, block);
+        rc = tx_stage_update(tx, DATA_START + new_block, block);
         if (rc != JFS_OK)
             return rc;
 
-        /* Link the new block into the directory inode. */
-        if (dir.block_count < JFS_NDIRECT) {
-            dir.direct[dir.block_count] = new_block;
-        } else {
-            /* Indirect block handling. */
-            if (dir.block_count == JFS_NDIRECT) {
-                uint32_t ind;
-                rc = fs_stage_alloc_block(fs, tx, &ind);
-                if (rc != JFS_OK)
-                    return rc;
-                uint8_t ind_block[BLOCK_SIZE];
-                memset(ind_block, 0, sizeof(ind_block));
-                uint32_t *entries = (uint32_t *)ind_block;
-                for (uint32_t k = 0; k < JFS_NDIRECT; k++)
-                    entries[k] = dir.direct[k];
-                entries[JFS_NDIRECT] = new_block;
-                rc = stage_whole_block(fs, tx, DATA_START + ind, ind_block);
-                if (rc != JFS_OK)
-                    return rc;
-                dir.indirect = ind;
-            } else {
-                uint8_t ind_block[BLOCK_SIZE];
-                uint32_t ind_img = DATA_START + dir.indirect;
-                rc = disk_read_block(fs->tm->disk, ind_img, ind_block);
-                if (rc != JFS_OK)
-                    return rc;
-                uint32_t *entries = (uint32_t *)ind_block;
-                entries[dir.block_count - JFS_NDIRECT] = new_block;
-                rc = stage_whole_block(fs, tx, ind_img, ind_block);
-                if (rc != JFS_OK)
-                    return rc;
-            }
-        }
-        dir.block_count++;
+        rc = link_block(fs, tx, &dir, new_block);
+        if (rc != JFS_OK)
+            return rc;
     }
 
     dir.size += (uint64_t)sizeof(struct dirent);
@@ -402,7 +402,7 @@ int fs_dir_remove(struct filesystem *fs, struct transaction *tx,
             if (de->name_len == strlen(name) &&
                 memcmp(de->name, name, strlen(name)) == 0) {
                 memset(de, 0, sizeof(*de));
-                rc = stage_whole_block(fs, tx, img_block, block);
+                rc = tx_stage_update(tx, img_block, block);
                 if (rc != JFS_OK)
                     return rc;
 
@@ -643,48 +643,20 @@ int fs_truncate(struct filesystem *fs, uint32_t ino, uint64_t size)
 
     uint32_t new_blocks = (uint32_t)((size + BLOCK_SIZE - 1) / BLOCK_SIZE);
     if (new_blocks > in.block_count) {
-        /* Allocate additional blocks. */
-        for (uint32_t b = in.block_count; b < new_blocks; b++) {
+        /* Grow: allocate and link blocks until the count is reached. */
+        while (in.block_count < new_blocks) {
             uint32_t blk;
             rc = fs_stage_alloc_block(fs, &tx, &blk);
             if (rc != JFS_OK)
                 goto out;
-            if (b < JFS_NDIRECT) {
-                in.direct[b] = blk;
-            } else {
-                /* Indirect block handling. */
-                if (b == JFS_NDIRECT) {
-                    uint32_t ind;
-                    rc = fs_stage_alloc_block(fs, &tx, &ind);
-                    if (rc != JFS_OK)
-                        goto out;
-                    uint8_t ind_block[BLOCK_SIZE];
-                    memset(ind_block, 0, sizeof(ind_block));
-                    uint32_t *entries = (uint32_t *)ind_block;
-                    for (uint32_t k = 0; k < JFS_NDIRECT; k++)
-                        entries[k] = in.direct[k];
-                    entries[JFS_NDIRECT] = blk;
-                    rc = stage_whole_block(fs, &tx, DATA_START + ind, ind_block);
-                    if (rc != JFS_OK)
-                        goto out;
-                    in.indirect = ind;
-                } else {
-                    uint8_t ind_block[BLOCK_SIZE];
-                    uint32_t ind_img = DATA_START + in.indirect;
-                    rc = disk_read_block(fs->tm->disk, ind_img, ind_block);
-                    if (rc != JFS_OK)
-                        goto out;
-                    uint32_t *entries = (uint32_t *)ind_block;
-                    entries[b - JFS_NDIRECT] = blk;
-                    rc = stage_whole_block(fs, &tx, ind_img, ind_block);
-                    if (rc != JFS_OK)
-                        goto out;
-                }
-            }
+            rc = link_block(fs, &tx, &in, blk);
+            if (rc != JFS_OK)
+                goto out;
         }
     } else if (new_blocks < in.block_count) {
-        /* Free surplus blocks. */
-        for (uint32_t b = new_blocks; b < in.block_count; b++) {
+        /* Shrink: free surplus blocks. */
+        while (in.block_count > new_blocks) {
+            uint32_t b = in.block_count - 1;
             uint32_t blk;
             if (b < JFS_NDIRECT) {
                 blk = in.direct[b];
@@ -698,17 +670,17 @@ int fs_truncate(struct filesystem *fs, uint32_t ino, uint64_t size)
                 uint32_t *entries = (uint32_t *)ind_block;
                 blk = entries[b - JFS_NDIRECT];
                 entries[b - JFS_NDIRECT] = JFS_BLOCK_FREE;
-                rc = stage_whole_block(fs, &tx, ind_img, ind_block);
+                rc = tx_stage_update(&tx, ind_img, ind_block);
                 if (rc != JFS_OK)
                     goto out;
             }
             rc = fs_stage_free_block(fs, &tx, blk);
             if (rc != JFS_OK)
                 goto out;
+            in.block_count--;
         }
     }
 
-    in.block_count = new_blocks;
     in.size = size;
     in.mtime = (uint64_t)time(NULL);
     in.ctime = in.mtime;
@@ -884,41 +856,20 @@ int fs_write_data(struct filesystem *fs, uint32_t ino, const void *buf,
         }
 
         if (need_alloc) {
-            uint32_t free_index = 0;
-            int found = 0;
-            for (uint32_t i = 0; i < DATA_BLOCK_COUNT; i++) {
-                if (!bitmap_test(bitmap, i)) {
-                    free_index = i;
-                    found = 1;
-                    break;
-                }
-            }
-            if (!found) {
-                rc = JFS_ERR_NOSPC;
+            rc = bitmap_find_free(bitmap, &blk);
+            if (rc != JFS_OK)
                 goto out;
-            }
-            bitmap_set(bitmap, free_index);
-            blk = free_index;
+            bitmap_set(bitmap, blk);
             fs->tm->sb.free_blocks--;
 
             if (bi < JFS_NDIRECT) {
                 in.direct[bi] = blk;
             } else {
                 if (in.indirect == JFS_BLOCK_FREE) {
-                    /* Allocate the indirect block itself. */
-                    uint32_t ind = 0;
-                    int ifound = 0;
-                    for (uint32_t i = 0; i < DATA_BLOCK_COUNT; i++) {
-                        if (!bitmap_test(bitmap, i)) {
-                            ind = i;
-                            ifound = 1;
-                            break;
-                        }
-                    }
-                    if (!ifound) {
-                        rc = JFS_ERR_NOSPC;
+                    uint32_t ind;
+                    rc = bitmap_find_free(bitmap, &ind);
+                    if (rc != JFS_OK)
                         goto out;
-                    }
                     bitmap_set(bitmap, ind);
                     in.indirect = ind;
                     memset(ind_block, 0, sizeof(ind_block));
@@ -949,11 +900,11 @@ int fs_write_data(struct filesystem *fs, uint32_t ino, const void *buf,
         pos += chunk;
     }
 
-    rc = stage_whole_block(fs, &tx, BITMAP_START, bitmap);
+    rc = tx_stage_update(&tx, BITMAP_START, bitmap);
     if (rc != JFS_OK)
         goto out;
     if (have_ind) {
-        rc = stage_whole_block(fs, &tx, DATA_START + in.indirect, ind_block);
+        rc = tx_stage_update(&tx, DATA_START + in.indirect, ind_block);
         if (rc != JFS_OK)
             goto out;
     }
