@@ -36,6 +36,7 @@
 int mkfs_format(const char *path);
 
 #ifdef HAVE_FUSE
+#define FUSE_USE_VERSION 31
 #include <fuse3/fuse.h>
 #include "fuse_ops.h"
 #endif
@@ -265,20 +266,23 @@ static int cmd_mv(struct filesystem *fs, const char *oldp, const char *newp)
     if (rc != JFS_OK)
         return rc;
 
+    tx_manager_lock(fs->tm);
+
     struct transaction tx;
     rc = tx_begin(fs->tm, &tx);
-    if (rc != JFS_OK)
+    if (rc != JFS_OK) {
+        tx_manager_unlock(fs->tm);
         return rc;
+    }
 
     rc = fs_dir_remove(fs, &tx, old_parent, old_name);
-    if (rc != JFS_OK)
-        return rc;
+    if (rc == JFS_OK)
+        rc = fs_dir_add(fs, &tx, new_parent, new_name, ino, in.type);
+    if (rc == JFS_OK)
+        rc = tx_commit(&tx);
 
-    rc = fs_dir_add(fs, &tx, new_parent, new_name, ino, in.type);
-    if (rc != JFS_OK)
-        return rc;
-
-    return tx_commit(&tx);
+    tx_manager_unlock(fs->tm);
+    return rc;
 }
 
 static int cmd_ls(struct filesystem *fs, const char *path)
@@ -462,7 +466,8 @@ static int run_cli(const char *image, int argc, char **argv)
 
 int fuse_main_entry(int argc, char **argv);
 
-static int run_fuse(const char *image, int argc, char **argv)
+/* argv layout expected by fuse_main_entry: [prog, image, mountpoint, ...] */
+static int run_fuse(int argc, char **argv)
 {
     return fuse_main_entry(argc, argv);
 }
@@ -485,15 +490,13 @@ int main(int argc, char **argv)
 
     const char *image = argv[1];
 
-    /* Heuristic: if the second argument is an existing directory, treat it
-     * as a FUSE mountpoint; otherwise treat it as a CLI command. */
 #ifdef HAVE_FUSE
+    /* If the second argument is an existing directory, treat it as a FUSE
+     * mountpoint; otherwise treat it as a CLI command. */
     struct stat st;
-    if (stat(image, &st) == 0 && S_ISREG(st.st_mode)) {
-        /* Looks like a CLI command run. */
-        return run_cli(image, argc - 2, argv + 2);
-    }
-    return run_fuse(image, argc - 2, argv + 2);
+    if (stat(argv[2], &st) == 0 && S_ISDIR(st.st_mode))
+        return run_fuse(argc, argv);
+    return run_cli(image, argc - 2, argv + 2);
 #else
     return run_cli(image, argc - 2, argv + 2);
 #endif

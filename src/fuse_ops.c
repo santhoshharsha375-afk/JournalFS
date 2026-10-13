@@ -11,12 +11,40 @@
 #include "fuse_ops.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 
+#define FUSE_USE_VERSION 31
+#include <fuse3/fuse.h>
+
 static struct filesystem *g_fs;
+
+/* Map internal JFS_ERR_* codes to POSIX errno values. */
+static int jfs_errno(int rc)
+{
+    switch (rc) {
+    case JFS_OK:           return 0;
+    case JFS_ERR_IO:       return -EIO;
+    case JFS_ERR_NOSPC:    return -ENOSPC;
+    case JFS_ERR_NOENT:    return -ENOENT;
+    case JFS_ERR_EXIST:    return -EEXIST;
+    case JFS_ERR_NOTEMPTY: return -ENOTEMPTY;
+    case JFS_ERR_NOTDIR:   return -ENOTDIR;
+    case JFS_ERR_ISDIR:    return -EISDIR;
+    case JFS_ERR_INVAL:    return -EINVAL;
+    case JFS_ERR_CORRUPT:  return -EIO;
+    case JFS_ERR_FORMAT:   return -EIO;
+    case JFS_ERR_BUSY:     return -EBUSY;
+    case JFS_ERR_NOMEM:    return -ENOMEM;
+    case JFS_ERR_TOOLARGE: return -EFBIG;
+    case JFS_ERR_BADF:     return -EBADF;
+    case JFS_ERR_FAULT:    return -EFAULT;
+    default:               return -EIO;
+    }
+}
 
 /* Resolve a full path ("/" or "/a/b") to its inode number. */
 static int path_to_ino(const char *path, uint32_t *ino)
@@ -30,7 +58,6 @@ static int path_to_ino(const char *path, uint32_t *ino)
     }
 
     uint32_t parent;
-    char name[JFS_NAME_MAX + 1];
 
     /* Split into parent directory and final component. */
     const char *slash = strrchr(path, '/');
@@ -97,25 +124,6 @@ static int jfs_getattr(const char *path, struct stat *st,
     return 0;
 }
 
-static int jfs_lookup(const char *path, struct fuse_entry_param *e)
-{
-    uint32_t ino;
-    int rc = path_to_ino(path, &ino);
-    if (rc != 0)
-        return rc;
-
-    struct inode in;
-    if (fs_read_inode(g_fs, ino, &in) != JFS_OK)
-        return -EIO;
-
-    memset(e, 0, sizeof(*e));
-    e->ino = ino;
-    e->attr_timeout = 1.0;
-    e->entry_timeout = 1.0;
-    inode_to_stat(&in, &e->attr);
-    return 0;
-}
-
 static int jfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                        off_t offset, struct fuse_file_info *fi,
                        enum fuse_readdir_flags flags)
@@ -164,7 +172,7 @@ static int jfs_create(const char *path, mode_t mode,
     char name[JFS_NAME_MAX + 1];
 
     const char *slash = strrchr(path, '/');
-    if (!slash || slash == path)
+    if (!slash)
         return -EINVAL;
     size_t plen = (size_t)(slash - path);
     char parent_path[plen + 1];
@@ -183,9 +191,7 @@ static int jfs_create(const char *path, mode_t mode,
 
     uint32_t ino;
     rc = fs_create(g_fs, parent, name, JFS_TYPE_FILE, mode & 07777, &ino);
-    if (rc != JFS_OK)
-        return -EIO;
-    return 0;
+    return jfs_errno(rc);
 }
 
 static int jfs_mkdir(const char *path, mode_t mode)
@@ -194,7 +200,7 @@ static int jfs_mkdir(const char *path, mode_t mode)
     char name[JFS_NAME_MAX + 1];
 
     const char *slash = strrchr(path, '/');
-    if (!slash || slash == path)
+    if (!slash)
         return -EINVAL;
     size_t plen = (size_t)(slash - path);
     char parent_path[plen + 1];
@@ -213,9 +219,7 @@ static int jfs_mkdir(const char *path, mode_t mode)
 
     uint32_t ino;
     rc = fs_create(g_fs, parent, name, JFS_TYPE_DIR, mode & 07777, &ino);
-    if (rc != JFS_OK)
-        return -EIO;
-    return 0;
+    return jfs_errno(rc);
 }
 
 static int jfs_unlink(const char *path)
@@ -224,7 +228,7 @@ static int jfs_unlink(const char *path)
     char name[JFS_NAME_MAX + 1];
 
     const char *slash = strrchr(path, '/');
-    if (!slash || slash == path)
+    if (!slash)
         return -EINVAL;
     size_t plen = (size_t)(slash - path);
     char parent_path[plen + 1];
@@ -241,7 +245,7 @@ static int jfs_unlink(const char *path)
     memcpy(name, slash + 1, nm_len);
     name[nm_len] = '\0';
 
-    return fs_unlink(g_fs, parent, name) == JFS_OK ? 0 : -EIO;
+    return jfs_errno(fs_unlink(g_fs, parent, name));
 }
 
 static int jfs_rmdir(const char *path)
@@ -250,7 +254,7 @@ static int jfs_rmdir(const char *path)
     char name[JFS_NAME_MAX + 1];
 
     const char *slash = strrchr(path, '/');
-    if (!slash || slash == path)
+    if (!slash)
         return -EINVAL;
     size_t plen = (size_t)(slash - path);
     char parent_path[plen + 1];
@@ -267,7 +271,7 @@ static int jfs_rmdir(const char *path)
     memcpy(name, slash + 1, nm_len);
     name[nm_len] = '\0';
 
-    return fs_rmdir(g_fs, parent, name) == JFS_OK ? 0 : -EIO;
+    return jfs_errno(fs_rmdir(g_fs, parent, name));
 }
 
 static int jfs_rename(const char *from, const char *to, unsigned int flags)
@@ -279,7 +283,7 @@ static int jfs_rename(const char *from, const char *to, unsigned int flags)
 
     const char *fslash = strrchr(from, '/');
     const char *tslash = strrchr(to, '/');
-    if (!fslash || !tslash || fslash == from || tslash == to)
+    if (!fslash || !tslash)
         return -EINVAL;
 
     size_t fplen = (size_t)(fslash - from);
@@ -307,7 +311,8 @@ static int jfs_rename(const char *from, const char *to, unsigned int flags)
     memcpy(to_name, tslash + 1, tnlen);
     to_name[tnlen] = '\0';
 
-    return fs_rename(g_fs, from_parent, to_parent, from_name, to_name) == JFS_OK ? 0 : -EIO;
+    return jfs_errno(fs_rename(g_fs, from_parent, to_parent,
+                               from_name, to_name));
 }
 
 static int jfs_truncate(const char *path, off_t size,
@@ -318,7 +323,7 @@ static int jfs_truncate(const char *path, off_t size,
     int rc = path_to_ino(path, &ino);
     if (rc != 0)
         return rc;
-    return fs_truncate(g_fs, ino, (uint64_t)size) == JFS_OK ? 0 : -EIO;
+    return jfs_errno(fs_truncate(g_fs, ino, (uint64_t)size));
 }
 
 static int jfs_open(const char *path, struct fuse_file_info *fi)
@@ -340,7 +345,7 @@ static int jfs_read(const char *path, char *buf, size_t size, off_t offset,
     size_t got = 0;
     rc = fs_read_data(g_fs, ino, buf, size, (uint64_t)offset, &got);
     if (rc != JFS_OK)
-        return -EIO;
+        return jfs_errno(rc);
     return (int)got;
 }
 
@@ -355,13 +360,12 @@ static int jfs_write(const char *path, const char *buf, size_t size,
 
     rc = fs_write_data(g_fs, ino, buf, size, (uint64_t)offset);
     if (rc != JFS_OK)
-        return -EIO;
+        return jfs_errno(rc);
     return (int)size;
 }
 
 static struct fuse_operations jfs_ops = {
     .getattr  = jfs_getattr,
-    .lookup   = jfs_lookup,
     .readdir  = jfs_readdir,
     .create   = jfs_create,
     .mkdir    = jfs_mkdir,
@@ -395,17 +399,18 @@ int fuse_main_entry(int argc, char **argv)
         return 1;
     }
 
-    /* Build the argv for fuse_main from everything after the image path. */
-    int fuse_argc = argc - 2;
+    /* Build the argv for fuse_main: program name, then everything after the
+     * image path (mountpoint followed by any extra FUSE options). */
+    int fuse_argc = argc - 1;   /* prog + mountpoint + opts */
     char **fuse_argv = (char **)calloc((size_t)fuse_argc + 1, sizeof(char *));
     if (!fuse_argv) {
         fs_close(g_fs);
         disk_close(d);
         return 1;
     }
-    for (int i = 0; i < fuse_argc; i++)
-        fuse_argv[i] = argv[2 + i];
     fuse_argv[0] = (char *)"journalfs";
+    for (int i = 1; i < fuse_argc; i++)
+        fuse_argv[i] = argv[1 + i];   /* argv[2..] = mountpoint + opts */
 
     int ret = fuse_main(fuse_argc, fuse_argv, &jfs_ops, NULL);
     free(fuse_argv);
