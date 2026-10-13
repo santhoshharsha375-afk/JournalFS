@@ -166,8 +166,7 @@ int fs_stage_alloc_block(struct filesystem *fs, struct transaction *tx,
  * JFS_NDIRECT direct blocks (48 KB); there is no indirect block, so the
  * 13th allocation reports out of space.  Shared by fs_dir_add and
  * fs_truncate. */
-static int link_block(struct filesystem *fs, struct transaction *tx,
-                      struct inode *in, uint32_t blk)
+static int link_block(struct inode *in, uint32_t blk)
 {
     if (in->block_count >= JFS_NDIRECT)
         return JFS_ERR_NOSPC;
@@ -368,7 +367,7 @@ int fs_dir_add(struct filesystem *fs, struct transaction *tx,
         if (rc != JFS_OK)
             return rc;
 
-        rc = link_block(fs, tx, &dir, new_block);
+        rc = link_block(&dir, new_block);
         if (rc != JFS_OK)
             return rc;
     }
@@ -640,7 +639,7 @@ int fs_truncate(struct filesystem *fs, uint32_t ino, uint64_t size)
             rc = fs_stage_alloc_block(fs, &tx, &blk);
             if (rc != JFS_OK)
                 goto out;
-            rc = link_block(fs, &tx, &in, blk);
+            rc = link_block(&in, blk);
             if (rc != JFS_OK)
                 goto out;
         }
@@ -672,8 +671,8 @@ out:
 /* Data I/O                                                           */
 
 /* Resolve a file block index to an image block number. */
-static int resolve_file_block(struct filesystem *fs, struct inode *in,
-                              uint32_t bi, uint32_t *img_block)
+static int resolve_file_block(const struct inode *in, uint32_t bi,
+                              uint32_t *img_block)
 {
     if (bi >= JFS_NDIRECT)
         return JFS_ERR_TOOLARGE;        /* 48 KB file size limit */
@@ -721,7 +720,7 @@ int fs_read_data(struct filesystem *fs, uint32_t ino, void *buf,
             chunk = (uint32_t)(len - done);
 
         uint32_t img_block;
-        rc = resolve_file_block(fs, &in, bi, &img_block);
+        rc = resolve_file_block(&in, bi, &img_block);
         if (rc != JFS_OK)
             break;
 

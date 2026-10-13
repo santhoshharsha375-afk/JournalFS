@@ -1,0 +1,37 @@
+$ mkfs_journalfs jfs.img
+mkfs_journalfs: created /tmp/jfs_jr_hiR9/jfs.img (16962 blocks, 16384 data blocks, 1024 inodes, 256 journal slots)
+
+$ journalfs jfs.img create /a.txt
+$ journalfs jfs.img write /a.txt 'journaled data'
+
+$ journalfs jfs.img journal      # the write-ahead log
+slot 0: type=1 txid=1 seq=0 gen=1 block=0 len=0
+slot 1: type=2 txid=1 seq=1 gen=1 block=2 len=4096
+slot 2: type=2 txid=1 seq=2 gen=1 block=578 len=4096
+slot 3: type=2 txid=1 seq=3 gen=1 block=0 len=4096
+slot 4: type=3 txid=1 seq=4 gen=1 block=0 len=0
+slot 5: type=1 txid=2 seq=0 gen=1 block=0 len=0
+slot 6: type=2 txid=2 seq=1 gen=1 block=1 len=4096
+slot 7: type=2 txid=2 seq=2 gen=1 block=2 len=4096
+slot 8: type=2 txid=2 seq=3 gen=1 block=0 len=4096
+slot 9: type=3 txid=2 seq=4 gen=1 block=0 len=0
+
+$ journalfs jfs.img recover      # replay committed transactions
+recovery: 10 record(s), 0 corrupt slot(s), 2 committed tx, 0 replayed, 0 block(s) applied
+
+$ journal_inspect jfs.img
+slot   0: BEGIN  txid=1 seq=0 gen=1 block=0 len=0
+slot   1: UPDATE txid=1 seq=1 gen=1 block=2 len=4096
+slot   2: UPDATE txid=1 seq=2 gen=1 block=578 len=4096
+slot   3: UPDATE txid=1 seq=3 gen=1 block=0 len=4096
+slot   4: COMMIT txid=1 seq=4 gen=1 block=0 len=0
+slot   5: BEGIN  txid=2 seq=0 gen=1 block=0 len=0
+slot   6: UPDATE txid=2 seq=1 gen=1 block=1 len=4096
+slot   7: UPDATE txid=2 seq=2 gen=1 block=2 len=4096
+slot   8: UPDATE txid=2 seq=3 gen=1 block=0 len=4096
+slot   9: COMMIT txid=2 seq=4 gen=1 block=0 len=0
+
+summary: 10 valid, 0 corrupt, 246 empty (of 256 slots)
+
+$ fsck_journalfs jfs.img
+fsck_journalfs: OK -- 2 inodes, 3 dirents, 10 journal records, 2 committed

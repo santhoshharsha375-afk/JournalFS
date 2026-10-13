@@ -1,0 +1,19 @@
+$ mkfs_journalfs jfs.img
+mkfs_journalfs: created /tmp/jfs_cap_x34D/jfs.img (16962 blocks, 16384 data blocks, 1024 inodes, 256 journal slots)
+
+$ journalfs jfs.img mnt -f &
+MOUNTED
+
+$ echo hello > mnt/hello.txt
+$ cat mnt/hello.txt
+hello
+
+$ ls -l mnt
+total 0
+-rw-r--r-- 1 root root 6 Oct 13 10:10 hello.txt
+
+$ fusermount3 -u mnt
+UNMOUNTED
+
+$ fsck_journalfs jfs.img
+fsck_journalfs: OK -- 2 inodes, 3 dirents, 10 journal records, 2 committed

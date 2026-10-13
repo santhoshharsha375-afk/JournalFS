@@ -1,0 +1,24 @@
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c src/crc32.c -o build/src/crc32.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c src/disk.c -o build/src/disk.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c src/journal.c -o build/src/journal.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c src/transaction.c -o build/src/transaction.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c src/filesystem.c -o build/src/filesystem.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c src/recovery.c -o build/src/recovery.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c src/checkpoint.c -o build/src/checkpoint.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c src/fsck.c -o build/src/fsck.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c src/mkfs.c -o build/src/mkfs.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c src/main.c -o build/src/main.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c src/fuse_ops.c -o build/src/fuse_ops.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -o build/journalfs build/src/crc32.o build/src/disk.o build/src/journal.o build/src/transaction.o build/src/filesystem.o build/src/recovery.o build/src/checkpoint.o build/src/fsck.o build/src/mkfs.o build/src/main.o build/src/fuse_ops.o -lpthread -lfuse3 -lpthread  
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c tools/mkfs_journalfs.c -o build/tools/mkfs_journalfs.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -o build/mkfs_journalfs build/src/mkfs.o build/src/crc32.o build/src/disk.o build/tools/mkfs_journalfs.o -lpthread 
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c tools/fsck_journalfs.c -o build/tools/fsck_journalfs.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -o build/fsck_journalfs build/src/fsck.o build/src/crc32.o build/src/disk.o build/src/journal.o build/tools/fsck_journalfs.o -lpthread 
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c tools/journal_inspect.c -o build/tools/journal_inspect.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -o build/journal_inspect build/src/crc32.o build/src/disk.o build/src/journal.o build/tools/journal_inspect.o -lpthread 
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c tests/jfs_test.c -o build/tests/jfs_test.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -o build/jfs_test build/src/crc32.o build/src/disk.o build/src/journal.o build/src/transaction.o build/src/filesystem.o build/src/recovery.o build/src/checkpoint.o build/src/fsck.o build/src/mkfs.o build/tests/jfs_test.o -lpthread 
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c benchmarks/jfs_bench.c -o build/benchmarks/jfs_bench.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -o build/jfs_bench build/src/crc32.o build/src/disk.o build/src/journal.o build/src/transaction.o build/src/filesystem.o build/src/recovery.o build/src/checkpoint.o build/src/fsck.o build/src/mkfs.o build/benchmarks/jfs_bench.o -lpthread 
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -c benchmarks/jfs_plot.c -o build/benchmarks/jfs_plot.o
+cc -std=c11 -Wall -Wextra -Wpedantic -g -O2  -D_POSIX_C_SOURCE=200809L -Iinclude -DHAVE_FUSE -I/usr/include/fuse3  -o build/jfs_plot build/benchmarks/jfs_plot.o 

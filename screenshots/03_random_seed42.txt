@@ -1,0 +1,8 @@
+=== random: seeded crash injection ===
+  seed=42 iterations=24
+  committed=19 discarded=5 inconsistent=0
+  PASS: every random crash left a consistent fs
+  PASS: both outcomes exercised
+
+Results: 2 passed, 0 failed
+ALL TESTS PASSED

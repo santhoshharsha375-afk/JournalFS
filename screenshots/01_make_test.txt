@@ -1,0 +1,116 @@
+bash tests/test_basic.sh
+=== Basic operation tests ===
+PASS: create file
+PASS: write file
+PASS: read file
+PASS: stat file
+PASS: mkdir
+PASS: write nested
+PASS: ls root
+PASS: ls dir
+PASS: rename
+PASS: fsck clean
+PASS: rm file
+PASS: rmdir
+PASS: fsck after cleanup
+
+Results: 13 passed, 0 failed
+ALL TESTS PASSED
+build/jfs_test
+=== unit: CRC32 ===
+  PASS: crc32("123456789") == 0xCBF43926
+  PASS: crc32("") == 0
+  PASS: incremental == one-shot
+=== unit: superblock ===
+  PASS: mkfs succeeds
+  PASS: disk opens
+  PASS: superblock CRC valid
+  PASS: magic
+  PASS: version
+  PASS: block size
+  PASS: journal bounds inside image
+  PASS: root inode is directory-capable
+=== unit: journal slot I/O ===
+  PASS: write slot 0
+  PASS: write slot 1 (update)
+  PASS: read back BEGIN
+  PASS: BEGIN type
+  PASS: BEGIN txid
+  PASS: read back UPDATE
+  PASS: UPDATE block
+  PASS: UPDATE payload matches
+  PASS: pread corruptible byte
+  PASS: pwrite flipped byte
+  PASS: corrupt record rejected
+  PASS: empty slot returns 0
+=== basic: file and directory operations ===
+  PASS: open with recovery
+  PASS: create /a.txt
+  PASS: write /a.txt
+  PASS: lookup /a.txt
+  PASS: read /a.txt
+  PASS: read content matches
+  PASS: mkdir /d
+  PASS: create /d/b.txt
+  PASS: write /d/b.txt
+  PASS: rename /a.txt -> /d/a.txt
+  PASS: /a.txt gone
+  PASS: /d/a.txt present
+  PASS: truncate /d/a.txt to 4
+  PASS: truncated size
+  PASS: unlink /d/a.txt
+  PASS: rmdir /d
+  PASS: fsck clean after basic ops
+=== atomic: multi-block ops all-or-nothing at commit ===
+  PASS: create@after_commit: fsck clean
+  PASS: create@after_commit: file exists
+  PASS: create@before_commit: fsck clean
+  PASS: create@before_commit: file absent
+  PASS: unlink@after_commit: fsck clean
+  PASS: unlink@after_commit: file gone
+  PASS: rename@after_commit: fsck clean
+  PASS: rename@after_commit: fully renamed
+  PASS: truncate@after_commit: fsck clean
+  PASS: truncate@after_commit: size == 4
+=== crash: deterministic injection at every stage ===
+  stage 1 (before_persist): crashed=1 exists=0 expected=0 fsck=1
+  PASS: before_persist
+  stage 2 (after_begin): crashed=1 exists=0 expected=0 fsck=1
+  PASS: after_begin
+  stage 3 (during_updates): crashed=1 exists=0 expected=0 fsck=1
+  PASS: during_updates
+  stage 4 (after_persist): crashed=1 exists=0 expected=0 fsck=1
+  PASS: after_persist
+  stage 5 (during_commit): crashed=1 exists=0 expected=0 fsck=1
+  PASS: during_commit
+  stage 6 (after_commit): crashed=1 exists=1 expected=1 fsck=1
+  PASS: after_commit
+  stage 7 (during_apply): crashed=1 exists=1 expected=1 fsck=1
+  PASS: during_apply
+  stage 8 (after_apply): crashed=1 exists=1 expected=1 fsck=1
+  PASS: after_apply
+  PASS: recovery run 1 fsck clean
+  PASS: recovery run 2 fsck clean
+=== random: seeded crash injection ===
+  seed=1791886213 iterations=24
+  committed=14 discarded=10 inconsistent=0
+  PASS: every random crash left a consistent fs
+  PASS: both outcomes exercised
+=== corrupt: checksums reject tampered records ===
+  PASS: corrupted journal byte detected
+  PASS: corrupted superblock detected
+  PASS: recovery completes despite corrupt record
+=== checkpoint: journal bounded over many transactions ===
+  PASS: open
+  cycles=400 max_journal_used=0/256
+  PASS: all cycles succeeded
+  PASS: journal usage stayed within capacity
+  PASS: fsck clean after checkpointing
+=== stress: multithreaded create/write/read/unlink soak ===
+  PASS: open
+  8 threads x 60 cycles = 1920 ops in 11.65s (165 ops/s), errors=0
+  PASS: no operation errors under concurrency
+  PASS: fsck clean after stress
+
+Results: 72 passed, 0 failed
+ALL TESTS PASSED

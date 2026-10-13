@@ -1,0 +1,39 @@
+build/jfs_test crash random atomic
+=== crash: deterministic injection at every stage ===
+  stage 1 (before_persist): crashed=1 exists=0 expected=0 fsck=1
+  PASS: before_persist
+  stage 2 (after_begin): crashed=1 exists=0 expected=0 fsck=1
+  PASS: after_begin
+  stage 3 (during_updates): crashed=1 exists=0 expected=0 fsck=1
+  PASS: during_updates
+  stage 4 (after_persist): crashed=1 exists=0 expected=0 fsck=1
+  PASS: after_persist
+  stage 5 (during_commit): crashed=1 exists=0 expected=0 fsck=1
+  PASS: during_commit
+  stage 6 (after_commit): crashed=1 exists=1 expected=1 fsck=1
+  PASS: after_commit
+  stage 7 (during_apply): crashed=1 exists=1 expected=1 fsck=1
+  PASS: during_apply
+  stage 8 (after_apply): crashed=1 exists=1 expected=1 fsck=1
+  PASS: after_apply
+  PASS: recovery run 1 fsck clean
+  PASS: recovery run 2 fsck clean
+=== random: seeded crash injection ===
+  seed=1791886236 iterations=24
+  committed=20 discarded=4 inconsistent=0
+  PASS: every random crash left a consistent fs
+  PASS: both outcomes exercised
+=== atomic: multi-block ops all-or-nothing at commit ===
+  PASS: create@after_commit: fsck clean
+  PASS: create@after_commit: file exists
+  PASS: create@before_commit: fsck clean
+  PASS: create@before_commit: file absent
+  PASS: unlink@after_commit: fsck clean
+  PASS: unlink@after_commit: file gone
+  PASS: rename@after_commit: fsck clean
+  PASS: rename@after_commit: fully renamed
+  PASS: truncate@after_commit: fsck clean
+  PASS: truncate@after_commit: size == 4
+
+Results: 22 passed, 0 failed
+ALL TESTS PASSED
