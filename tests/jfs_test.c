@@ -736,6 +736,10 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
+    /* Line-buffer stdout so fork()'d crash-injection children never flush a
+     * duplicate copy of the parent's pending banner on exit. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     unsigned seed = (unsigned)time(NULL);
     int argi = 1;
     if (argc > 2 && strcmp(argv[1], "-s") == 0) {

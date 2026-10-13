@@ -1,4 +1,4 @@
 mode,ops,total_time_s,ops_per_sec,avg_latency_ms,median_latency_ms,p95_latency_ms,journal_used,journal_cap
-nojournal,600,0.6529,918.95,3.262,3.178,4.860,0,256
-journal,600,2.3150,259.18,11.571,11.543,16.700,0,256
-journal_ckpt,600,2.1179,283.30,10.544,10.309,15.420,0,256
+nojournal,600,0.5623,1066.98,2.809,2.667,4.602,0,256
+journal,600,2.0289,295.73,10.140,10.033,12.952,0,256
+journal_ckpt,600,2.0818,288.21,10.361,10.083,13.602,0,256
