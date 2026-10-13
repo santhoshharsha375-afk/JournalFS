@@ -7,12 +7,7 @@
 /mnt/
 *.img
 
-# Benchmark / crash-test output
-/results/*.csv
-/results/*.png
-/results/*.log
-
-# Python
+# Python (not used, but just in case)
 __pycache__/
 *.pyc
 .venv/

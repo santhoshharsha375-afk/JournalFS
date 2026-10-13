@@ -39,11 +39,12 @@ transaction from being replayed twice across successive mounts.
 
 ## Crash injection
 
-The crash-injection harness (`tests/test_crash_recovery.py`) sets the
-`JFS_CRASH_POINT` environment variable to one of eight stages.  The transaction
-code calls `abort()` at that exact, deterministic point, simulating a power
-failure.  After each crash the image is reopened, recovery runs, and the result
-is checked for atomicity and consistency.
+The crash-injection harness (`build/jfs_test crash` / `random`) forks a child
+per stage, arms a crash point via `tx_set_crash_point`, and lets the transaction
+code call `abort()` at that exact, deterministic point, simulating a power
+failure.  After each crash the parent reopens the image, recovery runs, and the
+result is checked for atomicity and consistency.  The CLI also honours the
+`JFS_CRASH_POINT` environment variable for manual experiments.
 
 ### SIGKILL vs power failure
 
