@@ -49,6 +49,19 @@ static void unlock_manager(struct tx_manager *tm)
         pthread_mutex_unlock((pthread_mutex_t *)tm->mutex);
 }
 
+/* Public wrappers: filesystem-level operations take the manager lock for
+ * their whole duration (recursive mutex, so the nested lock inside
+ * tx_commit is a no-op).  This serialises every metadata mutation. */
+void tx_manager_lock(struct tx_manager *tm)
+{
+    lock_manager(tm);
+}
+
+void tx_manager_unlock(struct tx_manager *tm)
+{
+    unlock_manager(tm);
+}
+
 /* Abort the process now.  Used by the crash-injection harness to simulate a
  * power failure at an exact, deterministic point in the protocol. */
 static void crash_now(void)
@@ -78,7 +91,14 @@ int tx_manager_open(struct tx_manager **out, struct disk *d)
         free(tm);
         return JFS_ERR_NOMEM;
     }
-    if (pthread_mutex_init(m, NULL) != 0) {
+    /* Recursive: fs-level ops hold the lock for their whole duration and
+     * tx_commit locks again internally. */
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    int mrc = pthread_mutex_init(m, &attr);
+    pthread_mutexattr_destroy(&attr);
+    if (mrc != 0) {
         free(m);
         free(tm);
         return JFS_ERR_IO;
@@ -215,7 +235,7 @@ int tx_persist(struct transaction *tx)
 
     uint32_t head = tm->state.head;
     tx->begin_slot = head;
-    tx->commit_slot = (head + tx->update_count + 2u) % JOURNAL_SLOTS;
+    tx->commit_slot = (head + 1u + tx->update_count) % JOURNAL_SLOTS;
 
     /* Record 1: BEGIN. */
     rc = journal_write_slot(tm->disk, head, JREC_TYPE_BEGIN, tx->txid, 0,
@@ -224,7 +244,8 @@ int tx_persist(struct transaction *tx)
         return rc;
     maybe_crash(tm, CRASH_AFTER_BEGIN);
 
-    /* Records 2..M+1: metadata UPDATEs. */
+    /* Records 2..M+1: metadata UPDATEs.  The superblock update was staged
+     * last, so it is written as the final update record. */
     for (uint32_t i = 0; i < tx->update_count; i++) {
         uint32_t slot = (head + 1u + i) % JOURNAL_SLOTS;
         rc = journal_write_slot(tm->disk, slot, JREC_TYPE_UPDATE, tx->txid,
@@ -235,15 +256,6 @@ int tx_persist(struct transaction *tx)
             return rc;
         maybe_crash(tm, CRASH_DURING_UPDATES);
     }
-
-    /* Record M+2: superblock UPDATE. */
-    uint32_t sblk_slot = (head + 1u + tx->update_count) % JOURNAL_SLOTS;
-    rc = journal_write_slot(tm->disk, sblk_slot, JREC_TYPE_UPDATE, tx->txid,
-                            tx->seq + 1u + tx->update_count, tx->generation,
-                            SUPERBLOCK_BLOCK,
-                            tx->updates[tx->update_count - 1u].data, BLOCK_SIZE);
-    if (rc != JFS_OK)
-        return rc;
 
     /* Advance in-memory journal state. */
     tm->state.head = (tx->commit_slot + 1u) % JOURNAL_SLOTS;
@@ -303,9 +315,18 @@ int tx_apply(struct transaction *tx)
 
     tx->applied = 1;
     tm->sb.journal_head = tm->state.head;
+    tm->sb.journal_tail = tm->state.tail;
     tm->sb.last_txid = tm->state.last_txid;
     tm->sb.last_committed_txid = tm->state.last_committed;
     tm->sb.last_checkpointed_txid = tx->txid;
+
+    /* The home blocks (including the superblock that records this
+     * transaction as checkpointed) are now durable, so the journal slots
+     * this transaction used can be reclaimed immediately.  Advancing the
+     * tail here keeps the ring bounded without a separate checkpoint
+     * pass; the new tail is persisted by the next transaction's
+     * superblock update. */
+    tm->state.tail = tm->state.head;
 
     maybe_crash(tm, CRASH_AFTER_APPLY);
     return JFS_OK;

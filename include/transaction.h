@@ -104,6 +104,11 @@ int tx_recover(struct tx_manager *tm, char *report, size_t report_len);
 /* Set a deterministic crash point (used by the crash-injection harness). */
 void tx_set_crash_point(struct tx_manager *tm, int stage);
 
+/* Manager-level lock: filesystem operations hold this for their whole
+ * duration so concurrent metadata mutations serialise on one mutex. */
+void tx_manager_lock(struct tx_manager *tm);
+void tx_manager_unlock(struct tx_manager *tm);
+
 /* Force a checkpoint: advance the journal tail to reclaim the space used by
  * transactions that are already applied.  Safe to call when idle. */
 int tx_checkpoint(struct tx_manager *tm);
