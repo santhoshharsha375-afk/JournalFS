@@ -1,0 +1,340 @@
+================================================================================
+JOURNALFS -- COMPLETE PROJECT BRIEFING (read this to fully understand the project)
+================================================================================
+
+Last updated: 2026-10-13. Repo: https://github.com/santhoshharsha375-afk/JournalFS
+Branch: master. Language: 100% C11 (POSIX). No Python anywhere. Ubuntu/WSL2 only.
+
+--------------------------------------------------------------------------------
+1. WHAT THIS PROJECT IS
+--------------------------------------------------------------------------------
+JournalFS is an academic (university course) small filesystem that is
+CRASH-CONSISTENT using a WRITE-AHEAD LOG (WAL), atomic transactions, mount-time
+recovery, checkpointing, an fsck checker, deterministic crash injection,
+benchmarks, and SVG graph generation. It is NOT a kernel filesystem: it lives on
+top of a regular file ("disk image") and runs as a user process.
+
+Two ways to use it:
+  (a) FUSE 3 mount -- appears as a real directory (mkdir /mnt/jfs, ls, cat...).
+  (b) Non-FUSE CLI  -- `./build/journalfs IMG create /a.txt`, `read`, `write`,
+      `ls`, `rm`, `mv`, `trunc`, `stat`, `fsck`, `recover`, `checkpoint`, `journal`.
+
+Everything (filesystem, tests, benchmark, graphs) builds with only `gcc` and
+`make`. FUSE dev libs are optional (auto-detected by pkg-config).
+
+Core guarantee: after a crash (process kill / simulated power failure) at ANY
+point during a metadata operation, reopening the image replays either the WHOLE
+committed transaction or NONE of it. Never a half-applied rename/unlink/create.
+
+--------------------------------------------------------------------------------
+2. WHAT IT IS NOT / LIMITATIONS
+--------------------------------------------------------------------------------
+- Only METADATA is journaled (data=ordered semantics). File payload bytes are
+  written directly to data blocks BEFORE the metadata that references them.
+- Fixed size image: 16962 blocks x 4096 B = ~64 MiB, 1024 inodes, 16384 data
+  blocks, 256 journal slots. No resize, no dynamic inode growth.
+- Crash injection uses fork()+abort() (process crash). It verifies WRITE
+  ORDERING of the protocol; it does not emulate a device's volatile write cache.
+- One global RECURSIVE pthread mutex serialises every filesystem operation
+  (correctness over speed). No group commit, no journalled concurrency.
+- Single process only; no multi-client / network use.
+- Directories are flat (no subdirectory depth limit technically, but the CLI
+  and tests only exercise `/` and one level; FUSE supports nested paths via
+  path lookup).
+- Little-endian x86-64 only (structures on disk are not byte-order portable).
+
+--------------------------------------------------------------------------------
+3. ON-DISK LAYOUT (single source of truth: include/journalfs.h)
+--------------------------------------------------------------------------------
+Block = 4096 bytes. Image layout (block numbers):
+
+  block 0        superblock (struct superblock, 4096 B, CRC32 of bytes [0,0x5C))
+  block 1        data-block allocation bitmap (1 block, 16384 bits)
+  blocks 2..65   inode table (64 blocks, 1024 inodes x 256 B, 16 per block)
+  blocks 66..517 journal region (512 blocks = 256 slots x 8192 B/2blocks)
+  blocks 578..16961  data blocks (16384)
+
+Key constants (include/journalfs.h):
+  JFS_MAGIC 0x4A465331 ('JFS1'), JFS_VERSION 1
+  INODE_SIZE 256, INODE_COUNT 1024, JFS_NAME_MAX 244, DIRENTS_PER_BLOCK 16
+  JOURNAL_SLOT_SIZE 8192 (holds ONE record), JOURNAL_SLOTS 256, JFS_MAX_UPDATES 64
+  JFS_ROOT_INODE 1 (inode 0 reserved/invalid)
+  JFS_BLOCK_FREE 0xFFFFFFFF sentinel (0 is a valid block number)
+
+Structures (all with _Static_assert size checks):
+  struct superblock  -- magic, version, region offsets, free counts,
+                        journal_head/tail, last_txid, last_committed_txid,
+                        last_checkpointed_txid, journal_generation, crc.
+  struct inode       -- magic 'INOD', ino, type (FILE=1/DIR=2), mode, uid/gid,
+                        nlink, size, atime/mtime/ctime, block_count,
+                        direct[12], indirect (1024 more block pointers), crc.
+                        Max file size = (12+1024)*4096 = ~4.2 MB.
+  struct dirent      -- ino, type, name_len, name[244]; exactly 256 bytes.
+  struct jrec_header -- magic 'JREC', type (BEGIN=1/UPDATE=2/COMMIT=3), txid,
+                        seq, generation, payload_len, block, crc (32 bytes).
+
+CRC32: IEEE 802.3 reflected poly 0xEDB88320 (src/crc32.c), used by superblock,
+every inode, every directory block, every journal record.
+
+Error codes: JFS_OK 0, JFS_ERR_IO -1 ... JFS_ERR_FAULT -15 (journalfs.h).
+FUSE layer maps them to POSIX errno via jfs_errno() in src/fuse_ops.c
+(JFS_ERR_NOENT -> -ENOENT, JFS_ERR_EXIST -> -EEXIST, JFS_ERR_NOTEMPTY ->
+-ENOTEMPTY, JFS_ERR_NOSPC -> -ENOSPC, JFS_ERR_ISDIR -> -EISDIR, etc.).
+
+--------------------------------------------------------------------------------
+4. WRITE-AHEAD LOG PROTOCOL (the heart of the project)
+--------------------------------------------------------------------------------
+Modules: src/journal.c (record I/O), src/transaction.c (protocol),
+src/recovery.c (mount-time replay), src/checkpoint.c (reclaim).
+
+Transaction record flow -- the DURABILITY ORDER (fsync between every step):
+
+  1. tx_begin()        allocate txid, claim journal slots
+                       commit_slot = (head + 1 + update_count) % JOURNAL_SLOTS
+  2. tx_stage_update() collect full 4096-B replacement blocks in memory;
+                       staging the same block twice MERGES (replaces staged copy)
+  3. tx_persist()      write BEGIN record, then N UPDATE records (each carries a
+                       full new home block), then fsync the journal region
+  4. tx_commit_record() write COMMIT record, fsync  <-- DURABLE COMMIT POINT.
+                       If the crash happens before this fsync completes, the
+                       transaction MUST be discarded. After it, it MUST be
+                       replayed. This is the linearization point.
+  5. tx_apply()        write each update to its home block, fsync data region,
+                       then advance journal tail = head in the superblock
+                       (checkpoint is folded into apply -- space reclaimed
+                       immediately, so the ring never fills under sustained load)
+  6. Recovery never needs step 5's work if it already happened: replay is
+     IDEMPOTENT (writing the same block content again is harmless).
+
+Slot accounting invariant (verified by unit tests):
+  used = (head - tail + 256) % 256 <= 1 + update_count <= 65 slots per tx.
+
+Journal record validation on read (journal_read_slot): magic JREC, type, txid,
+seq, generation, crc -- any mismatch => record treated as torn/invalid.
+
+Why generation exists: guards against a stale image mounted after reformat.
+
+--------------------------------------------------------------------------------
+5. RECOVERY ALGORITHM (src/recovery.c, runs on every mount)
+--------------------------------------------------------------------------------
+  1. Read superblock, verify magic/version/CRC.
+  2. Scan journal from tail to head (slot-by-slot, CRC-validated).
+  3. Group records by txid in order. For each txid:
+       - has valid COMMIT record (seq after all UPDATEs, CRC ok, seq matches
+         exactly 1 + update_count)  => REPLAY: write every UPDATE's block to
+         its home location (idempotent), fsync.
+       - missing/torn COMMIT        => DISCARD (never applied).
+  4. Set superblock last_committed/checkpointed txids, persist, fsync.
+  5. Return report string (used by CLI `recover` and tests).
+
+Critical bug FIXED during development: tx_persist originally also wrote a
+superblock journal record whose seq collided with the COMMIT record (both
+seq = 1+update_count), so recovery rejected EVERY committed transaction
+(crash stages 6-8 lost committed data). Fix: no duplicate superblock record;
+commit_slot computed separately (commit  e25c753).
+
+--------------------------------------------------------------------------------
+6. FILESYSTEM OPERATIONS (src/filesystem.c, ~1015 lines -- biggest file)
+--------------------------------------------------------------------------------
+Public API (include/filesystem.h): fs_create, fs_mkdir, fs_unlink, fs_rmdir,
+fs_rename, fs_truncate, fs_write_data, fs_read_data, fs_read_inode, fs_lookup,
+fs_readdir, fs_stat, fs_open, fs_format (mkfs logic lives in src/mkfs.c).
+
+Correctness rules that were fixed during testing:
+- EVERY mutating op holds tx_manager_lock() (recursive mutex) for its WHOLE
+  duration; read ops (lookup/stat/read) take it too. Prevents torn interleavings.
+- fs_dir_add / fs_dir_remove use stage_block_read() (reads the IN-TRANSACTION
+  staged copy if the block was already modified this tx) NOT raw disk_read_block.
+  Bug fixed: rename read the dir block from disk after staging a removal, so
+  BOTH old and new names survived -> rename silently duplicated the entry.
+  Fix in commit 4b20d45; now `mv` works and fsck is clean.
+- tx_stage_update merges duplicate stages of one block.
+- Directory blocks: 16 dirents per 4096-B block; "." and ".." are synthesized
+  at readdir time (not stored), root inode 1.
+
+File data path: write_data allocates data blocks (bitmap), writes payload
+BEFORE linking metadata (ordered-data), then commits inode+bitmap via tx.
+
+--------------------------------------------------------------------------------
+7. FUSE LAYER (src/fuse_ops.c, include/fuse_ops.h)
+--------------------------------------------------------------------------------
+High-level libfuse3 API, ops struct jfs_ops:
+  getattr, readdir, create, mkdir, unlink, rmdir, rename, truncate, open,
+  read, write. (There is NO .lookup -- lookup goes through getattr; the code
+  originally defined it and would not compile/link against libfuse3.)
+- path_to_ino(path, &ino) resolves "/a/b/c" by iterative fs_lookup.
+- Top-level paths like "/t.txt" are VALID (bug fixed: old code returned
+  -EINVAL whenever slash == path).
+- jfs_errno(rc) maps JFS error -> negative POSIX errno (added for correctness;
+  raw -EIO hid ENOENT/EEXIST from userspace).
+- Mount: ./build/journalfs IMG MOUNTPOINT [-f] [-o opts]; run_fuse passes FULL
+  argv to fuse_main with layout [prog, image, mountpoint, ...] (fix: mountpoint
+  must be argv[1] of the fuse_main view, not argv[0]).
+- Unmount: fusermount3 -u MOUNTPOINT.
+- WSL2 CAVEAT: FUSE over /mnt/c (DrvFS) is FORBIDDEN ("mounting over
+  filesystem type 0x01021997 is forbidden"). Use native Linux FS paths
+  ($HOME, /tmp) or use the CLI. tests/fuse_smoke.sh documents this.
+
+--------------------------------------------------------------------------------
+8. CLI / BINARIES (src/main.c + tools/)
+--------------------------------------------------------------------------------
+Build outputs (all in build/):
+  journalfs        -- FUSE driver + CLI (mode auto-detected by subcommand)
+  mkfs_journalfs   -- format image (src/mkfs.c; refuses non-empty image)
+  fsck_journalfs   -- read-only checker (tools/fsck_journalfs.c + src/fsck.c)
+  journal_inspect  -- dump raw journal records (tools/journal_inspect.c)
+  jfs_test         -- the entire test suite
+  jfs_bench        -- benchmark harness
+  jfs_plot         -- SVG graph generator
+
+CLI subcommands: format, create, mkdir, read, write, rm, rmdir, mv, ls, stat,
+trunc, fsck [--repair], recover, checkpoint, journal, mount.
+
+fsck checks: superblock CRC/magic, bitmap vs inode block_count, inode CRCs,
+orphan inodes (allocated but unreferenced), dirent->ino validity, duplicate
+dirent names, free counts vs bitmap. --repair fixes only safe/deterministic
+issues (like stale free counters), never rewrites content.
+
+--------------------------------------------------------------------------------
+9. TEST SUITE (tests/jfs_test.c, 793 lines -- pure C, replaces old Python)
+--------------------------------------------------------------------------------
+Run: `make test` (shell smoke test + ALL suites) or individually:
+  ./build/jfs_test unit        -- CRC32 vectors, superblock layout/roundtrip,
+                                  journal slot write/read/CRC-corruption
+  ./build/jfs_test basic       -- format, create/write/read/unlink/mkdir/rmdir/
+                                  rename/truncate/stat, fsck clean
+  ./build/jfs_test atomic      -- multi-block tx visible all-or-nothing
+  ./build/jfs_test crash       -- 8 fork+abort stages (CRASH_BEFORE_PERSIST ..
+                                  CRASH_AFTER_APPLY). Stages 1-5 => tx ABSENT
+                                  after remount; 6-8 => tx PRESENT. +fsck each.
+  ./build/jfs_test random [-s N] -- seeded random ops with random crash stage;
+                                  on every restart: committed tx present,
+                                  uncommitted absent, fsck clean, journal bounded
+  ./build/jfs_test corrupt     -- flip bits in superblock/journal/inode; mount
+                                  must detect (CRC) or refuse, never crash
+  ./build/jfs_test checkpoint  -- 400 tx cycles; journal used stays <= 65 slots
+                                  (bounded ring), fsck clean
+  ./build/jfs_test stress      -- 8 threads x 60 cycles (create/write/read/
+                                  unlink/rmdir), 1920 ops, 0 errors, fsck clean
+Current results: 72/72 `make test`, 22/22 `make crash-test` (crash+random+atomic).
+ASan/UBSan: `make asan` then run suites -- clean (no leaks/UB reported).
+Shell test: tests/test_basic.sh (mkfs + CLI roundtrip), tests/fuse_smoke.sh
+(mount/create/write/read/mkdir/rename/delete/unmount/fsck -- PASSED).
+
+--------------------------------------------------------------------------------
+10. BENCHMARKS + GRAPHS (pure C, no matplotlib)
+--------------------------------------------------------------------------------
+  make benchmark   -> results/benchmark_results.csv
+  make graphs      -> results/throughput.svg, latency.svg, total_time.svg,
+                      journal.svg (hand-rolled SVG bar charts, zero deps)
+Modes: nojournal (WAL off, unsafe baseline), journal (full WAL),
+journal_ckpt (WAL + forced checkpoint every 20 tx).
+Workload: 200 cycles x (create+write+rm) = 600 ops per mode.
+Timing: clock_gettime(CLOCK_MONOTONIC) around each cycle, in-process.
+Latest measured (WSL2, gcc 13.3): nojournal ~822-919 ops/s (3.3-3.6 ms avg),
+journal ~214-259 ops/s (11.6-14.0 ms avg), journal_ckpt ~204-283 ops/s.
+Journaling costs ~3.5-4x throughput = price of 3 fsync barriers/tx (same cost
+class as ext3/ext4 metadata journaling). Journal utilisation = 0 slots between
+ops because apply reclaims immediately. Raw numbers in docs/benchmark_results.md.
+
+--------------------------------------------------------------------------------
+11. CONCURRENCY
+--------------------------------------------------------------------------------
+One PTHREAD_MUTEX_RECURSIVE in struct tx_manager (void *mutex), exposed via
+tx_manager_lock/unlock (include/transaction.h). Held for entire fs_* ops.
+Deliberately a single global lock: "correctness before optimisation".
+Group commit is an unimplemented stretch goal. Stress suite proves safety.
+
+--------------------------------------------------------------------------------
+12. BUILD SYSTEM (Makefile -- rewritten to be pure C)
+--------------------------------------------------------------------------------
+Targets: all (default), test, crash-test, benchmark, graphs, asan, clean.
+FUSE detection: `pkg-config --exists fuse3` -> compile src/fuse_ops.c with
+-DJFS_HAVE_FUSE3 and link -lfuse3; otherwise FUSE stubs out and CLI still works.
+No PYTHON anywhere (old Makefile invoked python3 for tests/plots -- removed).
+Compiler flags: -std=c11 -Wall -Wextra -Werror -O2 -pthread (asan target adds
+-fsanitize=address,undefined -g -O1).
+Requires: build-essential, pkg-config, libfuse3-dev (optional), on Ubuntu.
+
+--------------------------------------------------------------------------------
+13. KEY BUGS FOUND & FIXED (history of correctness work)
+--------------------------------------------------------------------------------
+1. WAL seq collision (transaction.c): duplicate superblock journal record made
+   recovery reject all committed txs. Fixed: commit_slot = head+1+update_count,
+   no dup record. Commit e25c753.
+2. Rename clobbering (filesystem.c): fs_dir_add/remove read from DISK not from
+   the staged tx copy -> rename left both old+new names. Fixed with
+   stage_block_read. Commit 4b20d45.
+3. FUSE3 API misuse (fuse_ops.c): nonexistent .lookup op, slash==path rejecting
+   top-level files, argv mountpoint overwrite, -EIO instead of real errno.
+   Fixed with jfs_errno + path checks + full-argv fuse_main. Commit 4b20d45.
+4. Unbounded journal: tail never advanced -> ring filled after 65 tx. Fixed:
+   tx_apply advances tail=head (checkpoint folded into apply). Commit e25c753.
+5. Racy concurrent ops: added recursive global lock around whole operations.
+   Commit e25c753.
+6. Read-modify-write clobber: stage_block_read everywhere a tx edits a block
+   it may have already staged.
+
+--------------------------------------------------------------------------------
+14. FILE MAP (~50 tracked files, ~5600 LOC of C)
+--------------------------------------------------------------------------------
+include/  journalfs.h (ALL on-disk structs+constants, THE spec), journal.h,
+          transaction.h, filesystem.h, disk.h, recovery.h, checkpoint.h,
+          fsck.h, fuse_ops.h
+src/      disk.c (222: image I/O, pread/pwrite, fsync, staging cache)
+          crc32.c (48)          journal.c (184: slot records)
+          transaction.c (405: WAL protocol+crash points)  recovery.c (279)
+          checkpoint.c (30)     fsck.c (275)
+          filesystem.c (1015: all fs ops)   mkfs.c (138)
+          fuse_ops.c (418)      main.c (503: CLI+FUSE dispatch)
+tools/    mkfs_journalfs.c, fsck_journalfs.c, journal_inspect.c (thin wrappers)
+tests/    jfs_test.c (793), test_basic.sh, fuse_smoke.sh
+benchmarks/ jfs_bench.c (212), jfs_plot.c (217)
+scripts/  setup.sh (apt deps), format_image.sh, mount.sh, unmount.sh, demo.sh
+docs/     architecture.md, on_disk_format.md, wal_protocol.md,
+          crash_recovery.md, testing.md, benchmark_results.md,
+          implementation_status.md, viva_questions.md
+results/  benchmark_results.csv + 4 SVGs (generated, committed)
+Makefile, README.md, LICENSE (MIT), .gitignore
+
+--------------------------------------------------------------------------------
+15. HOW TO BUILD & RUN (fresh Ubuntu)
+--------------------------------------------------------------------------------
+  sudo apt-get update && sudo apt-get install -y build-essential pkg-config libfuse3-dev
+  make                 # builds everything into build/
+  make test            # 72/72
+  make crash-test      # 22/22
+  make benchmark && make graphs
+  # FUSE try-out (native Linux FS only, NOT /mnt/c):
+  mkdir -p ~/jfs && ./build/mkfs_journalfs ~/jfs.img
+  ./build/journalfs ~/jfs.img ~/jfs -f &
+  echo hi > ~/jfs/a.txt; cat ~/jfs/a.txt; fusermount3 -u ~/jfs
+  # CLI without FUSE:
+  ./build/journalfs ~/jfs.img create /a.txt
+  ./build/journalfs ~/jfs.img write /a.txt hello
+  ./build/journalfs ~/jfs.img fsck
+
+--------------------------------------------------------------------------------
+16. GIT / COURSE CONTEXT
+--------------------------------------------------------------------------------
+7 commits on master, pushed to user's repo (was originally a friend's repo;
+origin was switched). History: initial format/disk layer -> full WAL/fs/fsck
+impl -> rename fix -> WAL seq + locking fix (e25c753) -> rename/FUSE fix
+(4b20d45) -> pure-C test/bench/plot replacement (62cd6b7) -> results update
+(fcf1f34). Demo + viva deliverables intentionally skipped per user instruction
+("do W1-12, leave demo and viva"); docs/viva_questions.md exists regardless.
+Course rubric themes covered: unit+integration+stress tests, crash injection at
+every protocol boundary, measured benchmarks with graphs, design docs, clean
+C11 with -Werror, stranger-friendly README.
+
+--------------------------------------------------------------------------------
+17. IF YOU ARE AN LLM PICKING THIS UP
+--------------------------------------------------------------------------------
+Start with include/journalfs.h (the on-disk spec), then src/transaction.c
+(the protocol), then src/recovery.c (the payoff). Tests in tests/jfs_test.c are
+the executable specification -- if you change behaviour, update them.
+Never write a home block before its journal record is fsynced; never advance
+the tail before the apply fsync completes; always stage-block-read inside a tx.
+Quote-safe commit messages: use `git commit -F file` (PowerShell mangles
+multi-line -m strings). Run WSL commands as `wsl.exe -e bash -lc '...'`.
+================================================================================
