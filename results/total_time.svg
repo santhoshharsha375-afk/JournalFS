@@ -22,14 +22,14 @@
 <line x1="95" y1="70" x2="100" y2="70" stroke="black"/>
 <text x="90" y="74" text-anchor="end" font-size="11">5</text>
 <text x="24" y="235" text-anchor="middle" font-size="12" transform="rotate(-90 24 235)">Total time (s)</text>
-<rect x="133" y="352" width="152" height="48" fill="#c0392b"/>
-<text x="210" y="348" text-anchor="middle" font-size="10">0.73</text>
+<rect x="133" y="357" width="152" height="43" fill="#c0392b"/>
+<text x="210" y="353" text-anchor="middle" font-size="10">0.65</text>
 <text x="210" y="420" text-anchor="middle" font-size="12">nojournal</text>
-<rect x="353" y="215" width="152" height="185" fill="#c0392b"/>
-<text x="430" y="211" text-anchor="middle" font-size="10">2.81</text>
+<rect x="353" y="248" width="152" height="152" fill="#c0392b"/>
+<text x="430" y="244" text-anchor="middle" font-size="10">2.31</text>
 <text x="430" y="420" text-anchor="middle" font-size="12">journal</text>
-<rect x="573" y="207" width="152" height="193" fill="#c0392b"/>
-<text x="650" y="203" text-anchor="middle" font-size="10">2.94</text>
+<rect x="573" y="261" width="152" height="139" fill="#c0392b"/>
+<text x="650" y="257" text-anchor="middle" font-size="10">2.12</text>
 <text x="650" y="420" text-anchor="middle" font-size="12">journal_ckpt</text>
 <rect x="100" y="459" width="14" height="14" fill="#c0392b"/>
 <text x="120" y="470" font-size="12">value</text>
